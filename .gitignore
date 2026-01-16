@@ -10,4 +10,6 @@ exports/
 # keep repo root bin scripts (launcher, helpers)
 !bin/
 !bin/**
+!logs/bootstrap/
+!logs/bootstrap/status.json
 
