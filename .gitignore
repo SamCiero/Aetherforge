@@ -4,12 +4,16 @@
 *.user
 *.suo
 
-logs/
 exports/
 
 # keep repo root bin scripts (launcher, helpers)
 !bin/
 !bin/**
+
+
+# logs: ignore everything except bootstrap status snapshot
+logs/
+!logs/
+logs/**
 !logs/bootstrap/
 !logs/bootstrap/status.json
-
