@@ -6,3 +6,8 @@
 
 logs/
 exports/
+
+# keep repo root bin scripts (launcher, helpers)
+!bin/
+!bin/**
+
