@@ -1,0 +1,21 @@
+* text=auto
+
+# Windows-first artifacts
+*.sln      text eol=crlf
+*.csproj   text eol=crlf
+*.props    text eol=crlf
+*.targets  text eol=crlf
+*.cs       text eol=crlf
+*.xaml     text eol=crlf
+*.ps1      text eol=crlf
+*.cmd      text eol=crlf
+*.bat      text eol=crlf
+
+# Cross-platform artifacts
+*.sh       text eol=lf
+*.yaml     text eol=lf
+*.yml      text eol=lf
+*.md       text eol=lf
+.editorconfig text eol=lf
+.gitignore    text eol=lf
+global.json   text eol=lf
