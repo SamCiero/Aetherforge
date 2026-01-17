@@ -1,8 +1,3 @@
-**/bin/
-**/obj/
-.vs/
-*.user
-*.suo
 
 exports/
 
@@ -17,3 +12,15 @@ logs/
 logs/**
 !logs/bootstrap/
 !logs/bootstrap/status.json
+
+# build outputs
+
+# build outputs
+
+# build outputs
+bin/
+obj/
+.vs/
+TestResults/
+*.user
+*.suo
