@@ -24,3 +24,9 @@ obj/
 TestResults/
 *.user
 *.suo
+
+# allow repo scripts in root bin
+!/bin/
+!/bin/*.cmd
+!/bin/*.ps1
+
