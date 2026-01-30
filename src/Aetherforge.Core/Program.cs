@@ -15,20 +15,41 @@ app.MapGet("/v1/status", async () =>
 
     // WSL-view paths
     var settingsPath = "/mnt/d/Aetherforge/config/settings.yaml";
-    var pinnedPath   = "/mnt/d/Aetherforge/config/pinned.yaml";
-    var dbPath       = "/var/lib/aetherforge/conversations.sqlite";
+    var pinnedPath = "/mnt/d/Aetherforge/config/pinned.yaml";
+    var dbPath = "/var/lib/aetherforge/conversations.sqlite";
 
-    // Ollama reachability + version
+    // Ollama reachability + version + live tags (for pins)
     var ollamaReachable = false;
     string? ollamaVersion = null;
+    OllamaTags? ollamaTags = null;
+
     try
     {
         using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(2) };
+
         var ver = await http.GetFromJsonAsync<OllamaVersion>("http://127.0.0.1:11434/api/version");
         ollamaReachable = ver is not null && !string.IsNullOrWhiteSpace(ver.version);
         ollamaVersion = ver?.version;
+
+        if (ollamaReachable)
+        {
+            ollamaTags = await http.GetFromJsonAsync<OllamaTags>("http://127.0.0.1:11434/api/tags");
+        }
     }
     catch { }
+
+    // Compute pins
+    var pinsMatch = false;
+    var modelDigestsMatch = false;
+    try
+    {
+        (pinsMatch, modelDigestsMatch) = ComputePins(pinnedPath, ollamaTags);
+    }
+    catch
+    {
+        pinsMatch = false;
+        modelDigestsMatch = false;
+    }
 
     // Ollama models dir from systemd metadata
     string? ollamaModelsDir = null;
@@ -132,7 +153,12 @@ app.MapGet("/v1/status", async () =>
         captured_utc = capturedUtc,
         core = new { reachable = true, base_url = "http://127.0.0.1:8484" },
         ollama = new { reachable = ollamaReachable, version = ollamaVersion, models_dir = ollamaModelsDir },
-        pins = new { pinned_yaml_path = @"D:\Aetherforge\config\pinned.yaml", pins_match = (bool?)null, model_digests_match = (bool?)null },
+        pins = new
+        {
+            pinned_yaml_path = @"D:\Aetherforge\config\pinned.yaml",
+            pins_match = pinsMatch,
+            model_digests_match = modelDigestsMatch
+        },
         db = new { path = dbPath, healthy = dbHealthy, error = dbError },
         gpu = new { visible = gpuVisible, evidence = gpuEvidence },
         tailnet = new { serve_enabled = false, published_port = (int?)null },
@@ -143,6 +169,70 @@ app.MapGet("/v1/status", async () =>
 });
 
 app.Run();
+
+static (bool pinsMatch, bool modelDigestsMatch) ComputePins(string pinnedPath, OllamaTags? tags)
+{
+    if (!File.Exists(pinnedPath)) return (false, false);
+
+    // Parse pinned.yaml loosely: capture tag->digest pairs where digest follows tag.
+    var want = new Dictionary<string, string>(StringComparer.Ordinal);
+    string? currentTag = null;
+
+    foreach (var raw in File.ReadLines(pinnedPath))
+    {
+        var line = raw.Trim();
+        if (line.StartsWith("tag:", StringComparison.Ordinal))
+        {
+            currentTag = ExtractYamlScalar(line.Substring("tag:".Length));
+            continue;
+        }
+
+        if (currentTag is not null && line.StartsWith("digest:", StringComparison.Ordinal))
+        {
+            var dig = ExtractYamlScalar(line.Substring("digest:".Length));
+            if (!string.IsNullOrWhiteSpace(currentTag) && !string.IsNullOrWhiteSpace(dig))
+                want[currentTag] = NormalizeDigest(dig);
+            currentTag = null;
+        }
+    }
+
+    if (want.Count == 0) return (false, false);
+
+    // If Ollama isn't reachable (no tags), pins exist but can't be verified.
+    if (tags?.models is null) return (true, false);
+
+    var have = new Dictionary<string, string>(StringComparer.Ordinal);
+    foreach (var m in tags.models)
+    {
+        if (string.IsNullOrWhiteSpace(m.name) || string.IsNullOrWhiteSpace(m.digest)) continue;
+        have[m.name] = NormalizeDigest(m.digest);
+    }
+
+    var ok = true;
+    foreach (var kv in want)
+    {
+        if (!have.TryGetValue(kv.Key, out var live) || !string.Equals(live, kv.Value, StringComparison.Ordinal))
+        {
+            ok = false;
+            break;
+        }
+    }
+
+    return (true, ok);
+}
+
+static string ExtractYamlScalar(string s)
+{
+    s = s.Trim();
+    if (s.Length >= 2 && s[0] == '"' && s[^1] == '"') s = s[1..^1];
+    return s.Trim();
+}
+
+static string NormalizeDigest(string s)
+{
+    s = s.Trim().Trim('"').ToLowerInvariant();
+    return s.StartsWith("sha256:", StringComparison.Ordinal) ? s["sha256:".Length..] : s;
+}
 
 static async Task ExecAsync(SqliteConnection conn, string sql)
 {
@@ -160,4 +250,5 @@ static async Task<string?> ScalarAsync(SqliteConnection conn, string sql)
 }
 
 sealed record OllamaVersion(string version);
-
+sealed record OllamaTags(List<OllamaModel> models);
+sealed record OllamaModel(string? name, string? digest);
