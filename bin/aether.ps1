@@ -20,14 +20,21 @@ Notes:
 "@ | Write-Host
 }
 
-function Strip-Ansi([string] $s) {
+function Get-ExitCode {
+  # $LASTEXITCODE is only guaranteed to exist after invoking a native executable.
+  # In a fresh session under StrictMode, reading it when unset throws.
+  if (Test-Path variable:LASTEXITCODE) { return $LASTEXITCODE }
+  if ($?) { return 0 } else { return 1 }
+}
+
+function Remove-Ansi([string] $s) {
   # Remove ANSI escape sequences like ESC[...m and stray cursor controls
   return ($s -replace "`e\[[0-9;]*[A-Za-z]", "")
 }
 
 function Invoke-OllamaGenerate {
   param(
-    [Parameter(Mandatory=$true)] [string] $Prompt,
+    [Parameter(Mandatory = $true)] [string] $Prompt,
     [string] $Model = "qwen2.5:7b-instruct",
     [switch] $Json
   )
@@ -57,9 +64,9 @@ PY
 )"
 printf '%s' "$payload" | curl -fsS http://127.0.0.1:11434/api/generate -H 'Content-Type: application/json' --data-binary @-
 '@
-    $bash = $bash.Replace("`r","")
+    $bash = $bash.Replace("`r", "")
     $raw = (wsl.exe -- bash -lc $bash) -join "`n"
-    $raw = Strip-Ansi $raw
+    $raw = Remove-Ansi $raw
 
     if ($Json) { return $raw.Trim() }
 
@@ -69,30 +76,37 @@ printf '%s' "$payload" | curl -fsS http://127.0.0.1:11434/api/generate -H 'Conte
 }
 
 $bin = $PSScriptRoot
-$sub = if ($Args.Count -gt 0) { $Args[0].ToLowerInvariant() } else { "help" }
-$rest = if ($Args.Count -gt 1) { $Args[1..($Args.Count-1)] } else { @() }
+
+# Normalize: ensure we ALWAYS have an array (prevents any ".Count" missing-property errors)
+$argv = @($Args)
+
+$sub  = if ($argv.Count -gt 0) { $argv[0].ToLowerInvariant() } else { "help" }
+$rest = if ($argv.Count -gt 1) { @($argv[1..($argv.Count-1)]) } else { @() }
 
 switch ($sub) {
   "status" {
     & (Join-Path $bin "aetherforge.ps1") -Cmd status
-    exit $LASTEXITCODE
+    exit (Get-ExitCode)
   }
 
   "start" {
     # For now: "start" == dev-core runner (long-running)
     & (Join-Path $bin "dev-core.ps1") @rest
-    exit $LASTEXITCODE
+    exit (Get-ExitCode)
   }
 
   "dev-core" {
     & (Join-Path $bin "dev-core.ps1") @rest
-    exit $LASTEXITCODE
+    exit (Get-ExitCode)
   }
 
   "ask" {
+    # Normalize again right at point of use (belt + suspenders)
+    $rest = @($rest)
+
     if ($rest.Count -lt 1) { Show-Usage; exit 2 }
 
-    $model = "qwen2.5:7b-instruct"
+    $model  = "qwen2.5:7b-instruct"
     $asJson = $false
 
     # tiny flag parser: -m <model> and --json

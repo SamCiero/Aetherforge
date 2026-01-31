@@ -14,4 +14,3 @@ switch ($Cmd) {
     irm "http://127.0.0.1:8484/v1/status" -NoProxy
   }
 }
-~

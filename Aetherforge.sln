@@ -17,18 +17,65 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Aetherforge.Core", "src\Aet
 EndProject
 Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "docs", "docs", "{9BD68711-2A3F-4C0D-9408-2749077A3069}"
 	ProjectSection(SolutionItems) = preProject
-		AetherChecklist.M0.md = AetherChecklist.M0.md
+		docs\AetherChecklist.M0.md = docs\AetherChecklist.M0.md
+		docs\AetherChecklist.M1.md = docs\AetherChecklist.M1.md
+		docs\AetherChecklist.M2.md = docs\AetherChecklist.M2.md
+		docs\AetherChecklist.M3.md = docs\AetherChecklist.M3.md
+		docs\AetherChecklist.M4.md = docs\AetherChecklist.M4.md
+		docs\AetherChecklist.M5.md = docs\AetherChecklist.M5.md
+		docs\AetherChecklist.M6.md = docs\AetherChecklist.M6.md
+		directory.md = directory.md
+		docs\roadmap.md = docs\roadmap.md
+		docs\spec.md = docs\spec.md
 	EndProjectSection
 EndProject
-Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Solution Items", "Solution Items", "{D2C39302-E1CF-41CC-9054-B16622D04D87}"
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "bin", "bin", "{47E2A52D-6F59-4570-A702-28373F1FCF90}"
+	ProjectSection(SolutionItems) = preProject
+		bin\aether.cmd = bin\aether.cmd
+		bin\aether.ps1 = bin\aether.ps1
+		bin\aetherforge.cmd = bin\aetherforge.cmd
+		bin\aetherforge.ps1 = bin\aetherforge.ps1
+		bin\dev-core.ps1 = bin\dev-core.ps1
+	EndProjectSection
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "config", "config", "{FE0FAE8C-1C6C-43E1-8855-B97326417993}"
+	ProjectSection(SolutionItems) = preProject
+		config\pinned.yaml = config\pinned.yaml
+		config\settings.yaml = config\settings.yaml
+	EndProjectSection
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "profiles", "profiles", "{92E2264E-5D1D-4D71-A112-629EF453BC66}"
+	ProjectSection(SolutionItems) = preProject
+		config\profiles\agent.yaml = config\profiles\agent.yaml
+		config\profiles\coding.yaml = config\profiles\coding.yaml
+		config\profiles\general.yaml = config\profiles\general.yaml
+	EndProjectSection
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Solution Items", "Solution Items", "{866B931F-E8FD-422B-9F6E-5A8DA7EF33BE}"
 	ProjectSection(SolutionItems) = preProject
 		.editorconfig = .editorconfig
 		.gitattributes = .gitattributes
 		.gitignore = .gitignore
-		bin\aether.ps1 = bin\aether.ps1
-		bin\aetherforge.ps1 = bin\aetherforge.ps1
-		bin\dev-core.ps1 = bin\dev-core.ps1
 		Directory.Build.props = Directory.Build.props
+		global.json = global.json
+	EndProjectSection
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "logs", "logs", "{7BEE7B09-5DC6-4F40-90AC-DF5C4B3004DA}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "bootstrap", "bootstrap", "{E72332D5-6896-44BB-98F4-FC41436BC523}"
+	ProjectSection(SolutionItems) = preProject
+		logs\bootstrap\gpu_inference_evidence.txt = logs\bootstrap\gpu_inference_evidence.txt
+		logs\bootstrap\status.json = logs\bootstrap\status.json
+	EndProjectSection
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "wsl", "wsl", "{E91FBCF5-E3C1-412A-9714-0B94AFF45A62}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "core", "core", "{11C03A8D-321F-443E-9492-EBCCC4AF05CE}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "scripts", "scripts", "{A5462AC9-2DFC-4984-9ABD-D9024E1F81E5}"
+	ProjectSection(SolutionItems) = preProject
+		wsl\core\scripts\run-dev.sh = wsl\core\scripts\run-dev.sh
+		wsl\core\scripts\smoke.sh = wsl\core\scripts\smoke.sh
 	EndProjectSection
 EndProject
 Global
@@ -111,6 +158,10 @@ Global
 		{EE563ADE-2A74-4AC4-B562-994BF8BE3771} = {827E0CD3-B72D-47B6-A68D-7590B98EB39B}
 		{9AD2D919-87CB-443D-9BD5-DD335CD21A05} = {827E0CD3-B72D-47B6-A68D-7590B98EB39B}
 		{EFACE314-6EEC-4CA0-86C5-74A60345ABF3} = {827E0CD3-B72D-47B6-A68D-7590B98EB39B}
+		{92E2264E-5D1D-4D71-A112-629EF453BC66} = {FE0FAE8C-1C6C-43E1-8855-B97326417993}
+		{E72332D5-6896-44BB-98F4-FC41436BC523} = {7BEE7B09-5DC6-4F40-90AC-DF5C4B3004DA}
+		{11C03A8D-321F-443E-9492-EBCCC4AF05CE} = {E91FBCF5-E3C1-412A-9714-0B94AFF45A62}
+		{A5462AC9-2DFC-4984-9ABD-D9024E1F81E5} = {11C03A8D-321F-443E-9492-EBCCC4AF05CE}
 	EndGlobalSection
 	GlobalSection(ExtensibilityGlobals) = postSolution
 		SolutionGuid = {61ED3199-A638-4C46-9BD3-1F223F9F10D3}

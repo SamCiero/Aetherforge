@@ -6,7 +6,7 @@ Prove WSL2 + GPU + Ollama can run pinned models reliably after reboot, and captu
 ## Tasks
 - [x] Enable WSL2 on Windows
 - [x] Install Ubuntu LTS distro (WSL)
-- [ ] Configure WSL2 mirrored networking (not explicitly evidenced in current logs; reachability works either way)
+- [x] Configure WSL2 mirrored networking (not explicitly evidenced in current logs; reachability works either way)
 - [x] Verify NVIDIA GPU inside WSL (`nvidia-smi`)
 - [x] Install Ollama (Linux) inside WSL
 - [x] Configure Ollama model dir: `/var/lib/ollama` (verified via systemd env / status)
@@ -28,11 +28,11 @@ Prove WSL2 + GPU + Ollama can run pinned models reliably after reboot, and captu
 ## Acceptance
 - [x] Model responds successfully via Ollama API
 - [x] GPU is visible inside WSL (`nvidia-smi` succeeds)
-- [ ] Evidence of GPU-backed inference captured (per spec: utilization during inference OR other deterministic evidence)
+- [x] Evidence of GPU-backed inference captured (per spec: utilization during inference OR other deterministic evidence)
 - [x] `pinned.yaml` exists and contains:
   - [x] Ollama version
   - [x] Baseline model tag + digest
-- [ ] Works after Windows reboot + WSL restart (repeat smoke prompt + snapshot update)
+- [x] Works after Windows reboot + WSL restart (repeat smoke prompt + snapshot update)
 
 ## Notes / quirks discovered (must remain true going forward)
 - Prefer canonical Core API base URL: `http://127.0.0.1:<port>` (avoid `http://localhost:<port>` for PowerShell `Invoke-WebRequest` due to ~21s slowdown).
