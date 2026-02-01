@@ -1,728 +1,1006 @@
+using Microsoft.Data.Sqlite;
 using System.Diagnostics;
+using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
-using Microsoft.Data.Sqlite;
 
-// Build and configure WebApplication
-var builder = WebApplication.CreateBuilder(args);
-builder.WebHost.UseUrls("http://127.0.0.1:8484");
+namespace Aetherforge.Core;
 
-var app = builder.Build();
-
-// Hard-coded paths (WSL view). These will later be loaded from settings.yaml.
-const string SettingsPath = "/mnt/d/Aetherforge/config/settings.yaml";
-const string PinnedPath = "/mnt/d/Aetherforge/config/pinned.yaml";
-const string DbPath = "/var/lib/aetherforge/conversations.sqlite";
-const string ExportsRoot = "/mnt/d/Aetherforge/exports";
-
-// Ensure DB directory exists and schema initialized
-await EnsureDatabaseAsync(DbPath);
-
-// Parse pinned model mapping once at startup
-var pinnedMapping = ParsePinnedMapping(PinnedPath);
-
-// ------------------ Status Endpoint ------------------
-app.MapGet("/v1/status", async () =>
+public sealed class Program
 {
-    var capturedUtc = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
+    // Canonical loopback (spec)
+    private const string CoreBindUrl = "http://127.0.0.1:8484";
+    private const string OllamaBaseUrl = "http://127.0.0.1:11434";
 
-    // Query Ollama for version and tags (best-effort)
-    var ollamaReachable = false;
-    string? ollamaVersion = null;
-    OllamaTags? ollamaTags = null;
-    try
-    {
-        using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(2) };
-        var ver = await http.GetFromJsonAsync<OllamaVersion>("http://127.0.0.1:11434/api/version");
-        ollamaReachable = ver is not null && !string.IsNullOrWhiteSpace(ver.version);
-        ollamaVersion = ver?.version;
-        if (ollamaReachable)
-        {
-            ollamaTags = await http.GetFromJsonAsync<OllamaTags>("http://127.0.0.1:11434/api/tags");
-        }
-    }
-    catch
-    {
-        ollamaReachable = false;
-    }
+    // Default WSL-view paths (override via env if needed)
+    private static readonly string SettingsPath = Env("AETHERFORGE_SETTINGS_PATH", "/mnt/d/Aetherforge/config/settings.yaml");
+    private static readonly string PinnedPath = Env("AETHERFORGE_PINNED_PATH", "/mnt/d/Aetherforge/config/pinned.yaml");
+    private static readonly string DbPath = Env("AETHERFORGE_DB_PATH", "/var/lib/aetherforge/conversations.sqlite");
+    private static readonly string ExportsRoot = Env("AETHERFORGE_EXPORTS_ROOT", "/mnt/d/Aetherforge/exports");
 
-    // Compute pins verification
-    bool pinsMatch = false;
-    bool modelDigestsMatch = false;
-    try
+    private static readonly JsonSerializerOptions JsonOpts = new()
     {
-        (pinsMatch, modelDigestsMatch) = ComputePins(PinnedPath, ollamaTags);
-    }
-    catch
-    {
-        pinsMatch = false;
-        modelDigestsMatch = false;
-    }
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
+        WriteIndented = false
+    };
 
-    // Determine Ollama models dir from systemd env (WSL only)
-    string? ollamaModelsDir = null;
-    try
+    public static async Task Main(string[] args)
     {
-        var psi = new ProcessStartInfo
+        var builder = WebApplication.CreateBuilder(args);
+        builder.WebHost.UseUrls(CoreBindUrl);
+
+        var app = builder.Build();
+
+        // Init & config load
+        await Db.EnsureInitializedAsync(DbPath);
+
+        var pins = Pins.TryLoadPinned(PinnedPath);
+        var policy = BoundaryPolicy.CreateDefault(SettingsPath, ExportsRoot);
+
+        // --------------------------- /v1/status ---------------------------
+        app.MapGet("/v1/status", async () =>
         {
-            FileName = "bash",
-            Arguments = "-lc \"systemctl show ollama -p Environment --value 2>/dev/null || true\"",
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-            CreateNoWindow = true,
-        };
-        using var p = Process.Start(psi);
-        if (p is not null && p.WaitForExit(1500))
-        {
-            var stdout = (p.StandardOutput.ReadToEnd() ?? "");
-            foreach (var part in stdout.Split(' ', StringSplitOptions.RemoveEmptyEntries))
+            var capturedUtc = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
+
+            // Ollama best-effort
+            bool ollamaReachable = false;
+            string? ollamaVersion = null;
+            OllamaTags? tags = null;
+
+            try
             {
-                if (part.StartsWith("OLLAMA_MODELS=", StringComparison.Ordinal))
-                {
-                    ollamaModelsDir = part["OLLAMA_MODELS=".Length..].Trim();
-                    break;
-                }
+                using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(2) };
+                var ver = await http.GetFromJsonAsync<OllamaVersion>($"{OllamaBaseUrl}/api/version");
+                ollamaReachable = ver is not null && !string.IsNullOrWhiteSpace(ver.Version);
+                ollamaVersion = ver?.Version;
+                if (ollamaReachable)
+                    tags = await http.GetFromJsonAsync<OllamaTags>($"{OllamaBaseUrl}/api/tags");
             }
-        }
-    }
-    catch { }
+            catch { /* best-effort */ }
 
-    // Database health check
-    bool dbHealthy = false;
-    string? dbError = null;
-    try
-    {
-        var csb = new SqliteConnectionStringBuilder { DataSource = DbPath, Mode = SqliteOpenMode.ReadOnly, Cache = SqliteCacheMode.Shared };
-        await using var conn = new SqliteConnection(csb.ToString());
-        await conn.OpenAsync();
-        // simple query to verify connection
-        await ExecAsync(conn, "PRAGMA busy_timeout=5000;");
-        dbHealthy = true;
-    }
-    catch (Exception ex)
-    {
-        dbHealthy = false;
-        dbError = ex.GetType().Name + ": " + ex.Message;
-    }
+            // Pins verification (deterministic semantics)
+            bool? pinsMatch = null;
+            bool? modelDigestsMatch = null;
+            string? pinsDetail = null;
 
-    // GPU visibility (best-effort)
-    var gpuVisible = false;
-    string? gpuEvidence = null;
-    try
-    {
-        var psi = new ProcessStartInfo
-        {
-            FileName = "bash",
-            Arguments = "-lc \"nvidia-smi --query-gpu=name,driver_version --format=csv,noheader\"",
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-            CreateNoWindow = true,
-        };
-        using var p = Process.Start(psi);
-        if (p is not null && p.WaitForExit(1500))
-        {
-            var stdout = (p.StandardOutput.ReadToEnd() ?? "").Trim();
-            gpuVisible = p.ExitCode == 0 && stdout.Length > 0;
-            gpuEvidence = gpuVisible ? stdout : null;
-        }
-    }
-    catch { }
-
-    var payload = new
-    {
-        schema_version = 1,
-        captured_utc = capturedUtc,
-        core = new { reachable = true, base_url = "http://127.0.0.1:8484" },
-        ollama = new { reachable = ollamaReachable, version = ollamaVersion, models_dir = ollamaModelsDir },
-        pins = new { pinned_yaml_path = @"D:\Aetherforge\config\pinned.yaml", pins_match = pinsMatch, model_digests_match = modelDigestsMatch },
-        db = new { path = DbPath, healthy = dbHealthy, error = dbError },
-        gpu = new { visible = gpuVisible, evidence = gpuEvidence },
-        tailnet = new { serve_enabled = false, published_port = (int?)null },
-        files = new { settings_exists = File.Exists(SettingsPath), pinned_exists = File.Exists(PinnedPath) }
-    };
-    return Results.Json(payload);
-});
-
-// ------------------ Conversation Endpoints ------------------
-
-// Create a new conversation
-app.MapPost("/v1/conversations", async (HttpContext context) =>
-{
-    var createReq = await context.Request.ReadFromJsonAsync<ConversationCreateRequest>(cancellationToken: context.RequestAborted);
-    if (createReq is null)
-    {
-        return Results.Json(new ErrorResponse("INVALID_REQUEST", "Request body is required"), statusCode: 400);
-    }
-    // Validate role and tier
-    if (string.IsNullOrWhiteSpace(createReq.Role) || string.IsNullOrWhiteSpace(createReq.Tier))
-    {
-        return Results.Json(new ErrorResponse("INVALID_ROLE_TIER", "Both role and tier are required"), statusCode: 400);
-    }
-    var role = createReq.Role.Trim().ToLowerInvariant();
-    var tier = createReq.Tier.Trim().ToLowerInvariant();
-    // Derive model tag/digest from pinned mapping
-    if (!pinnedMapping.TryGetValue((role, tier), out var modelInfo))
-    {
-        return Results.Json(new ErrorResponse("UNKNOWN_ROLE_TIER", $"No pinned model for role '{createReq.Role}' and tier '{createReq.Tier}'"), statusCode: 400);
-    }
-    // Insert conversation
-    int convoId;
-    var createdUtc = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
-    await using (var conn = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = DbPath, Mode = SqliteOpenMode.ReadWrite, Cache = SqliteCacheMode.Shared }.ToString()))
-    {
-        await conn.OpenAsync(context.RequestAborted);
-        await ExecAsync(conn, "PRAGMA busy_timeout=5000;");
-        var cmd = conn.CreateCommand();
-        cmd.CommandText = @"INSERT INTO conversations(created_utc, title, role, tier, model_tag, model_digest) VALUES($created_utc,$title,$role,$tier,$model_tag,$model_digest); SELECT last_insert_rowid();";
-        cmd.Parameters.AddWithValue("$created_utc", createdUtc);
-        cmd.Parameters.AddWithValue("$title", (object?)createReq.Title ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("$role", role);
-        cmd.Parameters.AddWithValue("$tier", tier);
-        cmd.Parameters.AddWithValue("$model_tag", modelInfo.Tag);
-        cmd.Parameters.AddWithValue("$model_digest", modelInfo.Digest);
-        var result = await cmd.ExecuteScalarAsync(context.RequestAborted);
-        convoId = Convert.ToInt32(result);
-    }
-    var conversationDto = new ConversationDto(convoId, createdUtc, createReq.Title, role, tier, modelInfo.Tag, modelInfo.Digest);
-    return Results.Json(conversationDto);
-});
-
-// Get a conversation and its messages
-app.MapGet("/v1/conversations/{id:int}", async (int id) =>
-{
-    await using var conn = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = DbPath, Mode = SqliteOpenMode.ReadWrite, Cache = SqliteCacheMode.Shared }.ToString());
-    await conn.OpenAsync();
-    await ExecAsync(conn, "PRAGMA busy_timeout=5000;");
-    // Fetch conversation
-    var convoCmd = conn.CreateCommand();
-    convoCmd.CommandText = "SELECT id, created_utc, title, role, tier, model_tag, model_digest FROM conversations WHERE id=$id LIMIT 1;";
-    convoCmd.Parameters.AddWithValue("$id", id);
-    await using var reader = await convoCmd.ExecuteReaderAsync();
-    if (!await reader.ReadAsync())
-    {
-        return Results.Json(new ErrorResponse("NOT_FOUND", $"Conversation {id} not found"), statusCode: 404);
-    }
-    var convo = new ConversationDto(reader.GetInt32(0), reader.GetString(1), reader.IsDBNull(2) ? null : reader.GetString(2), reader.GetString(3), reader.GetString(4), reader.GetString(5), reader.GetString(6));
-    await reader.CloseAsync();
-    // Fetch messages
-    var msgCmd = conn.CreateCommand();
-    msgCmd.CommandText = "SELECT id, created_utc, sender, content, meta_json FROM messages WHERE conversation_id=$cid ORDER BY id ASC;";
-    msgCmd.Parameters.AddWithValue("$cid", id);
-    var messages = new List<MessageDto>();
-    await using var mreader = await msgCmd.ExecuteReaderAsync();
-    while (await mreader.ReadAsync())
-    {
-        messages.Add(new MessageDto(mreader.GetInt32(0), mreader.GetString(1), mreader.GetString(2), mreader.GetString(3), mreader.IsDBNull(4) ? null : mreader.GetString(4)));
-    }
-    var combined = new ConversationWithMessagesDto(convo, messages);
-    return Results.Json(combined);
-});
-
-// List conversations with paging and optional search
-app.MapGet("/v1/conversations", async (HttpContext context) =>
-{
-    var query = context.Request.Query;
-    var limit = query.TryGetValue("limit", out var limStr) && int.TryParse(limStr, out var lVal) ? Math.Min(Math.Max(lVal, 1), 100) : 20;
-    var offset = query.TryGetValue("offset", out var offStr) && int.TryParse(offStr, out var oVal) ? Math.Max(oVal, 0) : 0;
-    var q = query.TryGetValue("q", out var qStr) ? qStr.ToString() : null;
-    await using var conn = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = DbPath, Mode = SqliteOpenMode.ReadWrite, Cache = SqliteCacheMode.Shared }.ToString());
-    await conn.OpenAsync();
-    await ExecAsync(conn, "PRAGMA busy_timeout=5000;");
-    // Count total
-    int total;
-    var countCmd = conn.CreateCommand();
-    if (!string.IsNullOrWhiteSpace(q))
-    {
-        countCmd.CommandText = "SELECT COUNT(*) FROM conversations WHERE title LIKE $q ESCAPE '\\'";
-        countCmd.Parameters.AddWithValue("$q", "%" + EscapeLike(q!) + "%");
-    }
-    else
-    {
-        countCmd.CommandText = "SELECT COUNT(*) FROM conversations";
-    }
-    total = Convert.ToInt32(await countCmd.ExecuteScalarAsync());
-    // Fetch items
-    var listCmd = conn.CreateCommand();
-    if (!string.IsNullOrWhiteSpace(q))
-    {
-        listCmd.CommandText = "SELECT id, created_utc, title, role, tier, model_tag, model_digest FROM conversations WHERE title LIKE $q ESCAPE '\\' ORDER BY id DESC LIMIT $limit OFFSET $offset";
-        listCmd.Parameters.AddWithValue("$q", "%" + EscapeLike(q!) + "%");
-    }
-    else
-    {
-        listCmd.CommandText = "SELECT id, created_utc, title, role, tier, model_tag, model_digest FROM conversations ORDER BY id DESC LIMIT $limit OFFSET $offset";
-    }
-    listCmd.Parameters.AddWithValue("$limit", limit);
-    listCmd.Parameters.AddWithValue("$offset", offset);
-    var items = new List<ConversationDto>();
-    await using var lreader = await listCmd.ExecuteReaderAsync();
-    while (await lreader.ReadAsync())
-    {
-        items.Add(new ConversationDto(lreader.GetInt32(0), lreader.GetString(1), lreader.IsDBNull(2) ? null : lreader.GetString(2), lreader.GetString(3), lreader.GetString(4), lreader.GetString(5), lreader.GetString(6)));
-    }
-    var response = new ConversationListResponse(items, limit, offset, total, offset + items.Count < total ? offset + items.Count : (int?)null);
-    return Results.Json(response);
-});
-
-// Update conversation metadata (title)
-app.MapMethods("/v1/conversations/{id:int}", new[] { "PATCH" }, async (int id, HttpContext context) =>
-{
-    var doc = await JsonDocument.ParseAsync(context.Request.Body, cancellationToken: context.RequestAborted);
-    if (!doc.RootElement.TryGetProperty("title", out var titleElem) || titleElem.ValueKind != JsonValueKind.String)
-    {
-        return Results.Json(new ErrorResponse("INVALID_REQUEST", "Missing 'title' field"), statusCode: 400);
-    }
-    var newTitle = titleElem.GetString();
-    if (newTitle is null)
-    {
-        return Results.Json(new ErrorResponse("INVALID_REQUEST", "Title must be a string"), statusCode: 400);
-    }
-    await using var conn = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = DbPath, Mode = SqliteOpenMode.ReadWrite, Cache = SqliteCacheMode.Shared }.ToString());
-    await conn.OpenAsync(context.RequestAborted);
-    await ExecAsync(conn, "PRAGMA busy_timeout=5000;");
-    var updateCmd = conn.CreateCommand();
-    updateCmd.CommandText = "UPDATE conversations SET title=$title WHERE id=$id";
-    updateCmd.Parameters.AddWithValue("$title", newTitle);
-    updateCmd.Parameters.AddWithValue("$id", id);
-    var rows = await updateCmd.ExecuteNonQueryAsync(context.RequestAborted);
-    if (rows == 0)
-    {
-        return Results.Json(new ErrorResponse("NOT_FOUND", $"Conversation {id} not found"), statusCode: 404);
-    }
-    return Results.Json(new { id, title = newTitle });
-});
-
-// ------------------ Chat Endpoint (SSE) ------------------
-app.MapPost("/v1/chat", async (HttpContext context) =>
-{
-    var chatReq = await context.Request.ReadFromJsonAsync<ChatRequest>(cancellationToken: context.RequestAborted);
-    if (chatReq is null)
-    {
-        context.Response.StatusCode = 400;
-        await WriteSseError(context, new ErrorResponse("INVALID_REQUEST", "Request body is required"));
-        return;
-    }
-    // If conversation_id is provided, fetch conversation; else create a new conversation using role/tier
-    ConversationDto convo;
-    if (chatReq.ConversationId.HasValue)
-    {
-        // retrieve existing conversation
-        await using var conn = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = DbPath, Mode = SqliteOpenMode.ReadWrite, Cache = SqliteCacheMode.Shared }.ToString());
-        await conn.OpenAsync(context.RequestAborted);
-        await ExecAsync(conn, "PRAGMA busy_timeout=5000;");
-        var cmd = conn.CreateCommand();
-        cmd.CommandText = "SELECT id, created_utc, title, role, tier, model_tag, model_digest FROM conversations WHERE id=$id LIMIT 1";
-        cmd.Parameters.AddWithValue("$id", chatReq.ConversationId.Value);
-        await using var reader = await cmd.ExecuteReaderAsync(context.RequestAborted);
-        if (!await reader.ReadAsync())
-        {
-            context.Response.StatusCode = 404;
-            await WriteSseError(context, new ErrorResponse("NOT_FOUND", $"Conversation {chatReq.ConversationId.Value} not found"));
-            return;
-        }
-        convo = new ConversationDto(reader.GetInt32(0), reader.GetString(1), reader.IsDBNull(2) ? null : reader.GetString(2), reader.GetString(3), reader.GetString(4), reader.GetString(5), reader.GetString(6));
-    }
-    else
-    {
-        // create a conversation if role and tier specified
-        if (string.IsNullOrWhiteSpace(chatReq.Role) || string.IsNullOrWhiteSpace(chatReq.Tier))
-        {
-            context.Response.StatusCode = 400;
-            await WriteSseError(context, new ErrorResponse("INVALID_ROLE_TIER", "Either provide conversation_id or specify role and tier"));
-            return;
-        }
-        var role = chatReq.Role!.Trim().ToLowerInvariant();
-        var tier = chatReq.Tier!.Trim().ToLowerInvariant();
-        if (!pinnedMapping.TryGetValue((role, tier), out var model))
-        {
-            context.Response.StatusCode = 400;
-            await WriteSseError(context, new ErrorResponse("UNKNOWN_ROLE_TIER", $"No pinned model for role '{chatReq.Role}' and tier '{chatReq.Tier}'"));
-            return;
-        }
-        int convoId;
-        var createdUtc = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
-        await using (var conn = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = DbPath, Mode = SqliteOpenMode.ReadWrite, Cache = SqliteCacheMode.Shared }.ToString()))
-        {
-            await conn.OpenAsync(context.RequestAborted);
-            await ExecAsync(conn, "PRAGMA busy_timeout=5000;");
-            var insert = conn.CreateCommand();
-            insert.CommandText = @"INSERT INTO conversations(created_utc, title, role, tier, model_tag, model_digest) VALUES($created_utc,$title,$role,$tier,$model_tag,$model_digest); SELECT last_insert_rowid();";
-            insert.Parameters.AddWithValue("$created_utc", createdUtc);
-            insert.Parameters.AddWithValue("$title", (object?)null ?? DBNull.Value);
-            insert.Parameters.AddWithValue("$role", role);
-            insert.Parameters.AddWithValue("$tier", tier);
-            insert.Parameters.AddWithValue("$model_tag", model.Tag);
-            insert.Parameters.AddWithValue("$model_digest", model.Digest);
-            var newId = await insert.ExecuteScalarAsync(context.RequestAborted);
-            convoId = Convert.ToInt32(newId);
-        }
-        convo = new ConversationDto(convoId, createdUtc, null, role, tier, model.Tag, model.Digest);
-    }
-    // Insert user message
-    int userMessageId;
-    var userCreatedUtc = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
-    var userContent = chatReq.Content ?? string.Empty;
-    await using (var conn = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = DbPath, Mode = SqliteOpenMode.ReadWrite, Cache = SqliteCacheMode.Shared }.ToString()))
-    {
-        await conn.OpenAsync(context.RequestAborted);
-        await ExecAsync(conn, "PRAGMA busy_timeout=5000;");
-        var ins = conn.CreateCommand();
-        ins.CommandText = @"INSERT INTO messages(conversation_id, created_utc, sender, content, meta_json) VALUES($cid,$created_utc,$sender,$content,$meta_json); SELECT last_insert_rowid();";
-        ins.Parameters.AddWithValue("$cid", convo.Id);
-        ins.Parameters.AddWithValue("$created_utc", userCreatedUtc);
-        ins.Parameters.AddWithValue("$sender", "user");
-        ins.Parameters.AddWithValue("$content", userContent);
-        ins.Parameters.AddWithValue("$meta_json", (object?)null ?? DBNull.Value);
-        var rid = await ins.ExecuteScalarAsync(context.RequestAborted);
-        userMessageId = Convert.ToInt32(rid);
-    }
-    // Setup SSE response
-    context.Response.StatusCode = 200;
-    context.Response.Headers["Content-Type"] = "text/event-stream";
-    await context.Response.Body.FlushAsync(context.RequestAborted);
-    // Determine model info
-    var modelTag = convo.ModelTag;
-    var modelDigest = convo.ModelDigest;
-    // Send meta event
-    var metaPayload = new { conversation_id = convo.Id, model_tag = modelTag, model_digest = modelDigest };
-    await WriteSseEvent(context, "meta", JsonSerializer.Serialize(metaPayload));
-    // Call Ollama API (best-effort; stream disabled for now)
-    string assistantAccumulated = string.Empty;
-    try
-    {
-        using var http = new HttpClient { Timeout = Timeout.InfiniteTimeSpan };
-        var requestBody = new
-        {
-            model = modelTag,
-            prompt = userContent,
-            stream = false
-        };
-        var reqContent = new StringContent(JsonSerializer.Serialize(requestBody), Encoding.UTF8, "application/json");
-        var response = await http.PostAsync("http://127.0.0.1:11434/api/generate", reqContent, context.RequestAborted);
-        if (!response.IsSuccessStatusCode)
-        {
-            // error from Ollama
-            var errMsg = await response.Content.ReadAsStringAsync(context.RequestAborted);
-            await WriteSseError(context, new ErrorResponse("OLLAMA_ERROR", $"Ollama returned {(int)response.StatusCode}: {errMsg}"));
-            return;
-        }
-        var respJson = await JsonSerializer.DeserializeAsync<Dictionary<string, JsonElement>>(await response.Content.ReadAsStreamAsync(context.RequestAborted), cancellationToken: context.RequestAborted);
-        if (respJson != null && respJson.TryGetValue("response", out var respElem))
-        {
-            assistantAccumulated = respElem.GetString() ?? string.Empty;
-            // send as delta (single chunk)
-            await WriteSseEvent(context, "delta", JsonSerializer.Serialize(new { message_id = 0, delta_text = assistantAccumulated }));
-        }
-    }
-    catch (Exception ex)
-    {
-        await WriteSseError(context, new ErrorResponse("OLLAMA_ERROR", ex.Message));
-        return;
-    }
-    // Insert assistant message into DB
-    var assistantCreatedUtc = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
-    int assistantMessageId;
-    await using (var conn = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = DbPath, Mode = SqliteOpenMode.ReadWrite, Cache = SqliteCacheMode.Shared }.ToString()))
-    {
-        await conn.OpenAsync(context.RequestAborted);
-        await ExecAsync(conn, "PRAGMA busy_timeout=5000;");
-        var insA = conn.CreateCommand();
-        insA.CommandText = @"INSERT INTO messages(conversation_id, created_utc, sender, content, meta_json) VALUES($cid,$created_utc,$sender,$content,$meta_json); SELECT last_insert_rowid();";
-        insA.Parameters.AddWithValue("$cid", convo.Id);
-        insA.Parameters.AddWithValue("$created_utc", assistantCreatedUtc);
-        insA.Parameters.AddWithValue("$sender", "assistant");
-        insA.Parameters.AddWithValue("$content", assistantAccumulated);
-        insA.Parameters.AddWithValue("$meta_json", (object?)null ?? DBNull.Value);
-        var rid = await insA.ExecuteScalarAsync(context.RequestAborted);
-        assistantMessageId = Convert.ToInt32(rid);
-    }
-    // Send done event
-    await WriteSseEvent(context, "done", JsonSerializer.Serialize(new { message_id = assistantMessageId }));
-});
-
-// ------------------ Export Endpoint ------------------
-app.MapPost("/v1/export/{id:int}", async (int id) =>
-{
-    // Read conversation and messages
-    ConversationDto? convo;
-    List<MessageDto> messages;
-    await using (var conn = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = DbPath, Mode = SqliteOpenMode.ReadOnly, Cache = SqliteCacheMode.Shared }.ToString()))
-    {
-        await conn.OpenAsync();
-        await ExecAsync(conn, "PRAGMA busy_timeout=5000;");
-        var ccmd = conn.CreateCommand();
-        ccmd.CommandText = "SELECT id, created_utc, title, role, tier, model_tag, model_digest FROM conversations WHERE id=$id LIMIT 1";
-        ccmd.Parameters.AddWithValue("$id", id);
-        await using var reader = await ccmd.ExecuteReaderAsync();
-        if (!await reader.ReadAsync())
-        {
-            return Results.Json(new ErrorResponse("NOT_FOUND", $"Conversation {id} not found"), statusCode: 404);
-        }
-        convo = new ConversationDto(reader.GetInt32(0), reader.GetString(1), reader.IsDBNull(2) ? null : reader.GetString(2), reader.GetString(3), reader.GetString(4), reader.GetString(5), reader.GetString(6));
-        await reader.CloseAsync();
-        // messages
-        var mcmd = conn.CreateCommand();
-        mcmd.CommandText = "SELECT id, created_utc, sender, content, meta_json FROM messages WHERE conversation_id=$cid ORDER BY id ASC";
-        mcmd.Parameters.AddWithValue("$cid", id);
-        messages = new List<MessageDto>();
-        await using var mreader = await mcmd.ExecuteReaderAsync();
-        while (await mreader.ReadAsync())
-        {
-            messages.Add(new MessageDto(mreader.GetInt32(0), mreader.GetString(1), mreader.GetString(2), mreader.GetString(3), mreader.IsDBNull(4) ? null : mreader.GetString(4)));
-        }
-    }
-    // Determine export folder path
-    var dateFolder = DateTime.UtcNow.ToString("yyyy-MM-dd");
-    var folderPath = Path.Combine(ExportsRoot, dateFolder);
-    Directory.CreateDirectory(folderPath);
-    var titleSlug = GenerateSlug(convo!.Title ?? "untitled");
-    var baseFilename = $"{convo.Id}.{titleSlug}";
-    var jsonPath = Path.Combine(folderPath, baseFilename + ".json");
-    var mdPath = Path.Combine(folderPath, baseFilename + ".md");
-    // Compose JSON
-    var exportObj = new
-    {
-        schema_version = 1,
-        generated_utc = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"),
-        core_version = "unknown",
-        conversation = new { id = convo.Id, created_utc = convo.CreatedUtc, title = convo.Title, role = convo.Role, tier = convo.Tier },
-        model = new { tag = convo.ModelTag, digest = convo.ModelDigest },
-        messages = messages.Select(m => new { id = m.Id, created_utc = m.CreatedUtc, sender = m.Sender, content = m.Content, meta_json = m.MetaJson }).ToList()
-    };
-    await File.WriteAllTextAsync(jsonPath, JsonSerializer.Serialize(exportObj, new JsonSerializerOptions { WriteIndented = true }));
-    // Compose Markdown
-    var sb = new StringBuilder();
-    sb.AppendLine($"# Conversation {convo.Id}");
-    sb.AppendLine();
-    sb.AppendLine($"- Title: {convo.Title ?? "(untitled)"}");
-    sb.AppendLine($"- Role/Tier: {convo.Role}/{convo.Tier}");
-    sb.AppendLine($"- Model: {convo.ModelTag} ({convo.ModelDigest})");
-    sb.AppendLine($"- Created: {convo.CreatedUtc}");
-    sb.AppendLine();
-    sb.AppendLine("## Messages");
-    sb.AppendLine();
-    foreach (var m in messages)
-    {
-        sb.AppendLine($"**{m.Sender}** ({m.CreatedUtc}):");
-        sb.AppendLine(m.Content);
-        sb.AppendLine();
-    }
-    await File.WriteAllTextAsync(mdPath, sb.ToString());
-    return Results.Json(new { json_path = jsonPath, md_path = mdPath });
-});
-
-app.Run();
-
-// ------------------ Helper Types and Functions ------------------
-
-record ConversationCreateRequest(string Role, string Tier, string? Title);
-record ConversationDto(int Id, string CreatedUtc, string? Title, string Role, string Tier, string ModelTag, string ModelDigest);
-record MessageDto(int Id, string CreatedUtc, string Sender, string Content, string? MetaJson);
-record ConversationWithMessagesDto(ConversationDto Conversation, List<MessageDto> Messages);
-record ConversationListResponse(List<ConversationDto> Items, int Limit, int Offset, int Total, int? NextOffset);
-record ChatRequest([property: JsonPropertyName("conversation_id")] int? ConversationId, string? Role, string? Tier, string? Content);
-record ErrorResponse(string Code, string Message, string? Detail = null, string? Hint = null);
-record ModelInfo(string Tag, string Digest);
-sealed record OllamaVersion(string version);
-sealed record OllamaTags(List<OllamaModel> models);
-sealed record OllamaModel(string? name, string? digest);
-
-static async Task EnsureDatabaseAsync(string dbPath)
-{
-    Directory.CreateDirectory(Path.GetDirectoryName(dbPath)!);
-    var csb = new SqliteConnectionStringBuilder { DataSource = dbPath, Mode = SqliteOpenMode.ReadWriteCreate, Cache = SqliteCacheMode.Shared };
-    await using var conn = new SqliteConnection(csb.ToString());
-    await conn.OpenAsync();
-    await ExecAsync(conn, "PRAGMA journal_mode=WAL;");
-    await ExecAsync(conn, "PRAGMA synchronous=NORMAL;");
-    await ExecAsync(conn, "PRAGMA busy_timeout=5000;");
-    // meta table
-    await ExecAsync(conn, """
-        CREATE TABLE IF NOT EXISTS meta (
-          key   TEXT PRIMARY KEY,
-          value TEXT NOT NULL
-        );
-        """);
-    await ExecAsync(conn, """
-        INSERT INTO meta(key,value) VALUES('schema_version','1')
-          ON CONFLICT(key) DO UPDATE SET value=excluded.value;
-        """);
-    // conversations table
-    await ExecAsync(conn, """
-        CREATE TABLE IF NOT EXISTS conversations (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          created_utc TEXT NOT NULL,
-          title TEXT NULL,
-          role TEXT NOT NULL,
-          tier TEXT NOT NULL,
-          model_tag TEXT NOT NULL,
-          model_digest TEXT NOT NULL
-        );
-        """);
-    // messages table
-    await ExecAsync(conn, """
-        CREATE TABLE IF NOT EXISTS messages (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          conversation_id INTEGER NOT NULL,
-          created_utc TEXT NOT NULL,
-          sender TEXT NOT NULL,
-          content TEXT NOT NULL,
-          meta_json TEXT NULL,
-          FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
-        );
-        """);
-}
-
-static Dictionary<(string role, string tier), ModelInfo> ParsePinnedMapping(string pinnedPath)
-{
-    var map = new Dictionary<(string, string), ModelInfo>(StringComparer.Ordinal);
-    if (!File.Exists(pinnedPath)) return map;
-    string? role = null;
-    string? tier = null;
-    string? tag = null;
-    string? digest = null;
-    foreach (var raw in File.ReadLines(pinnedPath))
-    {
-        var line = raw.Trim();
-        if (line.StartsWith("#") || line.Length == 0) continue;
-        if (line.EndsWith(":"))
-        {
-            // role or tier
-            var key = line[..^1];
-            if (role is null)
+            if (pins is null)
             {
-                role = key.Trim().ToLowerInvariant();
+                pinsMatch = null;
+                modelDigestsMatch = null;
+                pinsDetail = "pinned.yaml missing or unreadable";
+            }
+            else if (tags?.Models is null)
+            {
+                pinsMatch = null;
+                modelDigestsMatch = null;
+                pinsDetail = "ollama tags unavailable";
             }
             else
             {
-                tier = key.Trim().ToLowerInvariant();
+                pinsMatch = true;
+                modelDigestsMatch = Pins.VerifyAgainstTags(pins, tags);
             }
-            continue;
-        }
-        if (line.StartsWith("tag:", StringComparison.Ordinal))
-        {
-            tag = ExtractYamlScalar(line.Substring("tag:".Length));
-            continue;
-        }
-        if (line.StartsWith("digest:", StringComparison.Ordinal))
-        {
-            digest = NormalizeDigest(ExtractYamlScalar(line.Substring("digest:".Length)));
-        }
-        // When tag and digest captured, assign and reset tier
-        if (role is not null && tier is not null && tag is not null && digest is not null)
-        {
-            map[(role, tier)] = new ModelInfo(tag, digest);
-            tag = null;
-            digest = null;
-            tier = null;
-        }
-    }
-    return map;
-}
 
-static (bool pinsMatch, bool modelDigestsMatch) ComputePins(string pinnedPath, OllamaTags? tags)
-{
-    if (!File.Exists(pinnedPath)) return (false, false);
-    var want = new Dictionary<string, string>(StringComparer.Ordinal);
-    string? currentTag = null;
-    foreach (var raw in File.ReadLines(pinnedPath))
+            // DB health
+            var dbHealthy = false;
+            string? dbError = null;
+            try
+            {
+                await using var conn = Db.Open(DbPath);
+                await conn.OpenAsync();
+                var v = await Db.ScalarAsync(conn, "SELECT value FROM meta WHERE key='schema_version' LIMIT 1;");
+                dbHealthy = v?.Trim() == "1";
+            }
+            catch (Exception ex)
+            {
+                dbHealthy = false;
+                dbError = $"{ex.GetType().Name}: {ex.Message}";
+            }
+
+            // GPU evidence (best-effort)
+            bool gpuVisible = false;
+            string? gpuEvidence = null;
+            try
+            {
+                var (ok, outp) = Proc.TryRun("bash", "-lc \"nvidia-smi --query-gpu=name,driver_version --format=csv,noheader\"");
+                gpuVisible = ok && !string.IsNullOrWhiteSpace(outp);
+                gpuEvidence = gpuVisible ? outp.Trim() : null;
+            }
+            catch { /* best-effort */ }
+
+            var payload = new
+            {
+                schema_version = 1,
+                captured_utc = capturedUtc,
+                core = new { reachable = true, base_url = CoreBindUrl },
+                ollama = new { reachable = ollamaReachable, version = ollamaVersion },
+                pins = new
+                {
+                    pinned_yaml_path = @"D:\Aetherforge\config\pinned.yaml",
+                    pins_match = pinsMatch,
+                    model_digests_match = modelDigestsMatch,
+                    detail = pinsDetail
+                },
+                db = new { path = DbPath, healthy = dbHealthy, error = dbError },
+                gpu = new { visible = gpuVisible, evidence = gpuEvidence },
+                tailnet = new { serve_enabled = false, published_port = (int?)null },
+                files = new { settings_exists = File.Exists(SettingsPath), pinned_exists = File.Exists(PinnedPath) }
+            };
+
+            return Results.Json(payload, options: JsonOpts);
+        });
+
+        // ---------------------- POST /v1/conversations ----------------------
+        app.MapPost("/v1/conversations", async (ConversationCreateRequest req) =>
+        {
+            if (!Validation.TryRoleTier(req.Role, req.Tier, out var role, out var tier, out var err))
+                return ApiError.BadRequest(err!);
+
+            if (pins is null)
+                return ApiError.Failed("PIN_MISSING", "Pinned model map is missing", hint: "Ensure config/pinned.yaml exists.");
+
+            if (!pins.TryGetValue((role, tier), out var model))
+                return ApiError.BadRequest(new ErrorResponse("PIN_NO_MATCH", $"No pinned model for role={role} tier={tier}", hint: "Update pinned.yaml model mapping."));
+
+            var title = (req.Title ?? "").Trim();
+            if (title.Length == 0) title = $"{role}-{tier}";
+
+            await using var conn = Db.Open(DbPath);
+            await conn.OpenAsync();
+
+            var createdUtc = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
+            var id = await Db.InsertConversationAsync(conn, createdUtc, role, tier, title, model.Tag, model.Digest);
+
+            var dto = new ConversationDto(id, createdUtc, title, role, tier, model.Tag, model.Digest);
+            return Results.Json(dto, options: JsonOpts);
+        });
+
+        // ---------------------- GET /v1/conversations/{id} ----------------------
+        app.MapGet("/v1/conversations/{id:int}", async (int id) =>
+        {
+            await using var conn = Db.Open(DbPath);
+            await conn.OpenAsync();
+
+            var convo = await Db.GetConversationAsync(conn, id);
+            if (convo is null) return ApiError.NotFound("NOT_FOUND", $"Conversation {id} not found");
+
+            var msgs = await Db.GetMessagesAsync(conn, id);
+            var dto = new ConversationWithMessagesDto(convo, msgs);
+            return Results.Json(dto, options: JsonOpts);
+        });
+
+        // ---------------------- GET /v1/conversations?limit&offset&q ----------------------
+        app.MapGet("/v1/conversations", async (int? limit, int? offset, string? q) =>
+        {
+            var lim = Math.Clamp(limit ?? 20, 1, 200);
+            var off = Math.Max(offset ?? 0, 0);
+            var query = (q ?? "").Trim();
+
+            await using var conn = Db.Open(DbPath);
+            await conn.OpenAsync();
+
+            var items = await Db.ListConversationsAsync(conn, lim, off, query);
+            var dto = new ConversationListResponse(items, lim, off, query.Length > 0 ? query : null);
+            return Results.Json(dto, options: JsonOpts);
+        });
+
+        // ---------------------- PATCH /v1/conversations/{id} (title only) ----------------------
+        app.MapMethods("/v1/conversations/{id:int}", new[] { "PATCH" }, async (int id, ConversationPatchRequest req) =>
+        {
+            var title = (req.Title ?? "").Trim();
+            if (title.Length == 0) return ApiError.BadRequest(new ErrorResponse("BAD_REQUEST", "Title is required"));
+
+            await using var conn = Db.Open(DbPath);
+            await conn.OpenAsync();
+
+            var updated = await Db.UpdateConversationTitleAsync(conn, id, title);
+            if (!updated) return ApiError.NotFound("NOT_FOUND", $"Conversation {id} not found");
+
+            var convo = await Db.GetConversationAsync(conn, id);
+            return Results.Json(convo, options: JsonOpts);
+        });
+
+        // ---------------------- POST /v1/chat (SSE) ----------------------
+        app.MapPost("/v1/chat", async (HttpContext http, ChatRequest req) =>
+        {
+            if (req.ConversationId <= 0) return ApiError.BadRequest(new ErrorResponse("BAD_REQUEST", "conversation_id is required"));
+            if (string.IsNullOrWhiteSpace(req.Content)) return ApiError.BadRequest(new ErrorResponse("BAD_REQUEST", "content is required"));
+
+            await using var conn = Db.Open(DbPath);
+            await conn.OpenAsync();
+
+            var convo = await Db.GetConversationAsync(conn, req.ConversationId);
+            if (convo is null) return ApiError.NotFound("NOT_FOUND", $"Conversation {req.ConversationId} not found");
+
+            // Boundary: SSE response headers
+            http.Response.Headers.CacheControl = "no-cache";
+            http.Response.Headers.Connection = "keep-alive";
+            http.Response.ContentType = "text/event-stream; charset=utf-8";
+
+            // Persist user message
+            var nowUtc = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
+            _ = await Db.InsertMessageAsync(conn, req.ConversationId, nowUtc, "user", req.Content, metaJson: null);
+
+            // Create assistant placeholder message to get message_id for meta event
+            var assistantCreatedUtc = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
+            var assistantId = await Db.InsertMessageAsync(conn, req.ConversationId, assistantCreatedUtc, "assistant", content: "", metaJson: null);
+
+            // Emit meta
+            await Sse.WriteEventAsync(http.Response, "meta", new
+            {
+                conversation_id = req.ConversationId,
+                message_id = assistantId,
+                model_tag = convo.ModelTag,
+                model_digest = convo.ModelDigest
+            }, http.RequestAborted);
+
+            // Build Ollama chat request from DB history (simple replay)
+            var history = await Db.GetMessagesAsync(conn, req.ConversationId);
+            var ollamaReq = new OllamaChatRequest(
+                model: convo.ModelTag,
+                messages: history.Select(m => new OllamaMessage(m.Sender == "assistant" ? "assistant" : "user", m.Content)).ToList(),
+                stream: true
+            );
+
+            var assistantBuf = new StringBuilder();
+
+            try
+            {
+                using var httpClient = new HttpClient { Timeout = Timeout.InfiniteTimeSpan };
+                using var msg = new HttpRequestMessage(HttpMethod.Post, $"{OllamaBaseUrl}/api/chat");
+                msg.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/x-ndjson"));
+                msg.Content = new StringContent(JsonSerializer.Serialize(ollamaReq, JsonOpts), Encoding.UTF8, "application/json");
+
+                using var resp = await httpClient.SendAsync(msg, HttpCompletionOption.ResponseHeadersRead, http.RequestAborted);
+                if (!resp.IsSuccessStatusCode)
+                {
+                    await Sse.WriteEventAsync(http.Response, "error", new ErrorResponse(
+                        "OLLAMA_ERROR",
+                        $"Ollama returned {(int)resp.StatusCode}",
+                        detail: await SafeReadAsync(resp),
+                        hint: "Verify Ollama is running and the model tag exists."
+                    ), http.RequestAborted);
+                    return Results.Empty;
+                }
+
+                await using var stream = await resp.Content.ReadAsStreamAsync(http.RequestAborted);
+                using var reader = new StreamReader(stream, Encoding.UTF8);
+
+                while (!reader.EndOfStream && !http.RequestAborted.IsCancellationRequested)
+                {
+                    var line = await reader.ReadLineAsync();
+                    if (string.IsNullOrWhiteSpace(line)) continue;
+
+                    var delta = OllamaNdjson.TryExtractDelta(line);
+                    if (delta is null) continue;
+
+                    assistantBuf.Append(delta);
+
+                    await Sse.WriteEventAsync(http.Response, "delta", new
+                    {
+                        message_id = assistantId,
+                        delta_text = delta
+                    }, http.RequestAborted);
+                }
+
+                // Persist assistant final content
+                await Db.UpdateMessageContentAsync(conn, assistantId, assistantBuf.ToString());
+
+                await Sse.WriteEventAsync(http.Response, "done", new { message_id = assistantId }, http.RequestAborted);
+                return Results.Empty;
+            }
+            catch (OperationCanceledException)
+            {
+                // Cancellation: persist whatever we have and end silently
+                await Db.UpdateMessageContentAsync(conn, assistantId, assistantBuf.ToString());
+                return Results.Empty;
+            }
+            catch (Exception ex)
+            {
+                await Db.UpdateMessageContentAsync(conn, assistantId, assistantBuf.ToString());
+
+                await Sse.WriteEventAsync(http.Response, "error", new ErrorResponse(
+                    "CHAT_FAILED",
+                    "Chat failed",
+                    detail: $"{ex.GetType().Name}: {ex.Message}",
+                    hint: "Check Core logs and Ollama status."
+                ), CancellationToken.None);
+
+                return Results.Empty;
+            }
+        });
+
+        // ---------------------- POST /v1/export/{id} ----------------------
+        app.MapPost("/v1/export/{id:int}", async (int id) =>
+        {
+            await using var conn = Db.Open(DbPath);
+            await conn.OpenAsync();
+
+            var convo = await Db.GetConversationAsync(conn, id);
+            if (convo is null) return ApiError.NotFound("NOT_FOUND", $"Conversation {id} not found");
+
+            var msgs = await Db.GetMessagesAsync(conn, id);
+
+            // Resolve export dir: ExportsRoot/YYYY-MM-DD (UTC)
+            var dateDir = DateTime.UtcNow.ToString("yyyy-MM-dd");
+            var outDir = Path.Combine(ExportsRoot, dateDir);
+
+            // Boundary enforcement (exports only, minimal)
+            if (!policy.AllowWriteUnder(outDir, out var deny))
+                return ApiError.Forbidden(deny!);
+
+            Directory.CreateDirectory(outDir);
+
+            var slug = Slug.Make(convo.Title);
+            var mdPath = Path.Combine(outDir, $"{convo.Id}.{slug}.md");
+            var jsonPath = Path.Combine(outDir, $"{convo.Id}.{slug}.json");
+
+            // JSON export (schema v1)
+            var export = new ConversationExportV1(
+                schema_version: 1,
+                generated_utc: DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"),
+                core_version: "unknown",
+                conversation: new ExportConversation(convo.Id, convo.CreatedUtc, convo.Title, convo.Role, convo.Tier),
+                model: new ExportModel(convo.ModelTag, convo.ModelDigest),
+                messages: msgs.Select(m => new ExportMessage(m.Id, m.CreatedUtc, m.Sender, m.Content, m.MetaJson)).ToList()
+            );
+
+            var jsonText = JsonSerializer.Serialize(export, JsonOpts);
+            await File.WriteAllTextAsync(jsonPath, jsonText, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+
+            // Markdown export
+            var md = new StringBuilder();
+            md.AppendLine($"# Conversation {convo.Id}: {convo.Title}");
+            md.AppendLine();
+            md.AppendLine($"- created_utc: {convo.CreatedUtc}");
+            md.AppendLine($"- role: {convo.Role}");
+            md.AppendLine($"- tier: {convo.Tier}");
+            md.AppendLine($"- model_tag: {convo.ModelTag}");
+            md.AppendLine($"- model_digest: {convo.ModelDigest}");
+            md.AppendLine();
+            md.AppendLine("---");
+            md.AppendLine();
+
+            foreach (var m in msgs.OrderBy(x => x.Id))
+            {
+                md.AppendLine($"## {m.Sender} @ {m.CreatedUtc}");
+                md.AppendLine();
+                md.AppendLine(m.Content);
+                md.AppendLine();
+            }
+
+            await File.WriteAllTextAsync(mdPath, md.ToString(), new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+
+            return Results.Json(new { ok = true, dir = outDir, md = mdPath, json = jsonPath }, options: JsonOpts);
+        });
+
+        app.Run();
+    }
+
+    private static string Env(string name, string fallback)
+        => string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(name)) ? fallback : Environment.GetEnvironmentVariable(name)!;
+
+    private static async Task<string?> SafeReadAsync(HttpResponseMessage resp)
     {
-        var line = raw.Trim();
-        if (line.StartsWith("tag:", StringComparison.Ordinal))
-        {
-            currentTag = ExtractYamlScalar(line.Substring("tag:".Length));
-            continue;
-        }
-        if (currentTag is not null && line.StartsWith("digest:", StringComparison.Ordinal))
-        {
-            var dig = ExtractYamlScalar(line.Substring("digest:".Length));
-            if (!string.IsNullOrWhiteSpace(currentTag) && !string.IsNullOrWhiteSpace(dig))
-                want[currentTag] = NormalizeDigest(dig);
-            currentTag = null;
-        }
+        try { return await resp.Content.ReadAsStringAsync(); }
+        catch { return null; }
     }
-    if (want.Count == 0) return (false, false);
-    if (tags?.models is null) return (true, false);
-    var have = new Dictionary<string, string>(StringComparer.Ordinal);
-    foreach (var m in tags.models)
+}
+
+// --------------------------- DTOs ---------------------------
+
+public sealed record ConversationCreateRequest(string Role, string Tier, string? Title);
+public sealed record ConversationPatchRequest(string? Title);
+public sealed record ChatRequest([property: JsonPropertyName("conversation_id")] int ConversationId, string Content);
+
+public sealed record ConversationDto(
+    int Id,
+    [property: JsonPropertyName("created_utc")] string CreatedUtc,
+    string Title,
+    string Role,
+    string Tier,
+    [property: JsonPropertyName("model_tag")] string ModelTag,
+    [property: JsonPropertyName("model_digest")] string ModelDigest
+);
+
+public sealed record MessageDto(
+    int Id,
+    [property: JsonPropertyName("created_utc")] string CreatedUtc,
+    string Sender,
+    string Content,
+    [property: JsonPropertyName("meta_json")] string? MetaJson
+);
+
+public sealed record ConversationWithMessagesDto(ConversationDto Conversation, List<MessageDto> Messages);
+
+public sealed record ConversationListResponse(List<ConversationDto> Items, int Limit, int Offset, string? Q);
+
+// Export schema v1
+public sealed record ConversationExportV1(
+    int schema_version,
+    string generated_utc,
+    string core_version,
+    ExportConversation conversation,
+    ExportModel model,
+    List<ExportMessage> messages
+);
+
+public sealed record ExportConversation(int id, string created_utc, string title, string role, string tier);
+public sealed record ExportModel(string tag, string digest);
+public sealed record ExportMessage(int id, string created_utc, string sender, string content, string? meta_json);
+
+// Error model
+public sealed record ErrorResponse(string code, string message, string? detail = null, string? hint = null);
+
+// --------------------------- Helpers ---------------------------
+
+internal static class ApiError
+{
+    public static IResult BadRequest(ErrorResponse e) => Results.Json(e, statusCode: 400);
+    public static IResult Forbidden(ErrorResponse e) => Results.Json(e, statusCode: 403);
+    public static IResult NotFound(string code, string message) => Results.Json(new ErrorResponse(code, message), statusCode: 404);
+    public static IResult Failed(string code, string message, string? detail = null, string? hint = null)
+        => Results.Json(new ErrorResponse(code, message, detail, hint), statusCode: 500);
+}
+
+internal static class Validation
+{
+    public static bool TryRoleTier(string roleRaw, string tierRaw, out string role, out string tier, out ErrorResponse? err)
     {
-        if (string.IsNullOrWhiteSpace(m.name) || string.IsNullOrWhiteSpace(m.digest)) continue;
-        have[m.name] = NormalizeDigest(m.digest);
-    }
-    var ok = true;
-    foreach (var kv in want)
-    {
-        if (!have.TryGetValue(kv.Key, out var live) || !string.Equals(live, kv.Value, StringComparison.Ordinal))
+        role = (roleRaw ?? "").Trim().ToLowerInvariant();
+        tier = (tierRaw ?? "").Trim().ToLowerInvariant();
+        err = null;
+
+        if (role is not ("general" or "coding" or "agent"))
         {
-            ok = false;
-            break;
+            err = new ErrorResponse("BAD_REQUEST", $"Invalid role '{roleRaw}'");
+            return false;
         }
+
+        if (tier is not ("fast" or "thinking"))
+        {
+            err = new ErrorResponse("BAD_REQUEST", $"Invalid tier '{tierRaw}'");
+            return false;
+        }
+
+        return true;
     }
-    return (true, ok);
 }
 
-static string ExtractYamlScalar(string s)
+internal sealed class BoundaryPolicy
 {
-    s = s.Trim();
-    if (s.Length >= 2 && s[0] == '"' && s[^1] == '"') s = s[1..^1];
-    return s.Trim();
-}
+    private readonly string _exportsRoot;
 
-static string NormalizeDigest(string s)
-{
-    s = s.Trim().Trim('"').ToLowerInvariant();
-    return s.StartsWith("sha256:", StringComparison.Ordinal) ? s["sha256:".Length..] : s;
-}
-
-static async Task ExecAsync(SqliteConnection conn, string sql)
-{
-    await using var cmd = conn.CreateCommand();
-    cmd.CommandText = sql;
-    await cmd.ExecuteNonQueryAsync();
-}
-
-static async Task<string?> ScalarAsync(SqliteConnection conn, string sql)
-{
-    await using var cmd = conn.CreateCommand();
-    cmd.CommandText = sql;
-    var obj = await cmd.ExecuteScalarAsync();
-    return obj?.ToString();
-}
-
-static string EscapeLike(string input)
-{
-    // Escape SQLite wildcards
-    return input.Replace("\\", "\\\\").Replace("%", "\\%").Replace("_", "\\_");
-}
-
-static string GenerateSlug(string title)
-{
-    var sb = new StringBuilder();
-    foreach (var ch in title.ToLowerInvariant())
+    private BoundaryPolicy(string exportsRoot)
     {
-        if (char.IsLetterOrDigit(ch)) sb.Append(ch);
-        else if (ch == ' ' || ch == '-' || ch == '_') sb.Append('-');
+        _exportsRoot = Path.GetFullPath(exportsRoot);
     }
-    var slug = sb.ToString().Trim('-');
-    if (slug.Length == 0) slug = "untitled";
-    if (slug.Length > 64) slug = slug[..64];
-    return slug;
+
+    public static BoundaryPolicy CreateDefault(string settingsPath, string exportsRoot)
+    {
+        // settings.yaml is currently empty in repo; default to exportsRoot until populated.
+        _ = settingsPath; // reserved for future parsing
+        return new BoundaryPolicy(exportsRoot);
+    }
+
+    public bool AllowWriteUnder(string candidateDir, out ErrorResponse? deny)
+    {
+        deny = null;
+
+        var full = Path.GetFullPath(candidateDir);
+
+        if (!IsDescendant(full, _exportsRoot))
+        {
+            deny = new ErrorResponse("BOUNDARY_DENY", "Write denied outside exports root", detail: full, hint: $"Allowed root: {_exportsRoot}");
+            return false;
+        }
+
+        // Best-effort reparse/symlink block on the *existing* path segments
+        if (HasReparsePointInPath(full))
+        {
+            deny = new ErrorResponse("BOUNDARY_DENY", "Write denied due to reparse point/symlink in path", detail: full);
+            return false;
+        }
+
+        return true;
+    }
+
+    private static bool IsDescendant(string path, string root)
+    {
+        root = root.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;
+        return path.StartsWith(root, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool HasReparsePointInPath(string fullPath)
+    {
+        try
+        {
+            var parts = fullPath.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+                                .Where(p => !string.IsNullOrWhiteSpace(p))
+                                .ToArray();
+
+            // Rebuild progressively from root
+            string current = fullPath.StartsWith(Path.DirectorySeparatorChar) ? Path.DirectorySeparatorChar.ToString() : parts[0];
+
+            for (int i = fullPath.StartsWith(Path.DirectorySeparatorChar) ? 0 : 1; i < parts.Length; i++)
+            {
+                current = Path.Combine(current, parts[i]);
+                if (Directory.Exists(current))
+                {
+                    var attr = File.GetAttributes(current);
+                    if ((attr & FileAttributes.ReparsePoint) != 0) return true;
+                }
+            }
+        }
+        catch { /* best-effort */ }
+
+        return false;
+    }
 }
 
-static async Task WriteSseEvent(HttpContext context, string eventName, string json)
+internal static class Slug
 {
-    var writer = context.Response.BodyWriter;
-    var data = Encoding.UTF8.GetBytes($"event: {eventName}\ndata: {json}\n\n");
-    await writer.WriteAsync(data, context.RequestAborted);
-    await writer.FlushAsync(context.RequestAborted);
+    public static string Make(string? title)
+    {
+        var s = (title ?? "").Trim().ToLowerInvariant();
+        if (s.Length == 0) s = "conversation";
+
+        var sb = new StringBuilder(s.Length);
+        bool dash = false;
+
+        foreach (var ch in s)
+        {
+            if (char.IsLetterOrDigit(ch))
+            {
+                sb.Append(ch);
+                dash = false;
+            }
+            else
+            {
+                if (!dash)
+                {
+                    sb.Append('-');
+                    dash = true;
+                }
+            }
+        }
+
+        var outp = sb.ToString().Trim('-');
+        if (outp.Length == 0) outp = "conversation";
+        if (outp.Length > 64) outp = outp[..64].Trim('-');
+        return outp;
+    }
 }
 
-static async Task WriteSseError(HttpContext context, ErrorResponse error)
+internal static class Sse
 {
-    var payload = JsonSerializer.Serialize(error);
-    await WriteSseEvent(context, "error", payload);
+    public static async Task WriteEventAsync(HttpResponse resp, string eventName, object payload, CancellationToken ct)
+    {
+        var json = JsonSerializer.Serialize(payload, ProgramJson.Options);
+        await resp.WriteAsync($"event: {eventName}\n", ct);
+        await resp.WriteAsync($"data: {json}\n\n", ct);
+        await resp.Body.FlushAsync(ct);
+    }
+
+    // tiny indirection so we can serialize consistently without referencing Program.JsonOpts directly
+    private static class ProgramJson
+    {
+        public static readonly JsonSerializerOptions Options = new()
+        {
+            PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+            DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
+            WriteIndented = false
+        };
+    }
+}
+
+internal static class Proc
+{
+    public static (bool ok, string output) TryRun(string file, string args)
+    {
+        var psi = new ProcessStartInfo
+        {
+            FileName = file,
+            Arguments = args,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true
+        };
+
+        using var p = Process.Start(psi);
+        if (p is null) return (false, "");
+
+        p.WaitForExit(1500);
+        var outp = (p.StandardOutput.ReadToEnd() ?? "");
+        return (p.ExitCode == 0, outp);
+    }
+}
+
+// --------------------------- Pins (minimal YAML parse) ---------------------------
+
+internal sealed record ModelInfo(string Tag, string Digest);
+
+internal static class Pins
+{
+    public static Dictionary<(string role, string tier), ModelInfo>? TryLoadPinned(string pinnedPath)
+    {
+        if (!File.Exists(pinnedPath)) return null;
+
+        // Minimal, deterministic parse for the pinned.yaml structure defined in spec.
+        // Supports:
+        // models:
+        //   general:
+        //     fast:
+        //       tag: "..."
+        //       digest: "..."
+
+        string? currentRole = null;
+        string? currentTier = null;
+
+        var map = new Dictionary<(string, string), ModelInfo>();
+
+        foreach (var raw in File.ReadLines(pinnedPath))
+        {
+            var line = raw.TrimEnd();
+            if (string.IsNullOrWhiteSpace(line)) continue;
+            var t = line.TrimStart();
+            if (t.StartsWith('#')) continue;
+
+            var indent = line.Length - t.Length;
+
+            // role key under models (indent 2)
+            if (indent == 2 && t.EndsWith(':') && t != "ollama:" && t != "models:")
+            {
+                currentRole = t[..^1].Trim().ToLowerInvariant();
+                currentTier = null;
+                continue;
+            }
+
+            // tier key under role (indent 4)
+            if (indent == 4 && t.EndsWith(':'))
+            {
+                currentTier = t[..^1].Trim().ToLowerInvariant();
+                continue;
+            }
+
+            // tag/digest under tier (indent >=6)
+            if (indent >= 6 && currentRole is not null && currentTier is not null)
+            {
+                if (t.StartsWith("tag:", StringComparison.Ordinal))
+                {
+                    var tag = Scalar(t["tag:".Length..]);
+                    if (!map.TryGetValue((currentRole, currentTier), out var existing))
+                        map[(currentRole, currentTier)] = new ModelInfo(tag, "");
+                    else
+                        map[(currentRole, currentTier)] = existing with { Tag = tag };
+                }
+                else if (t.StartsWith("digest:", StringComparison.Ordinal))
+                {
+                    var dig = NormalizeDigest(Scalar(t["digest:".Length..]));
+                    if (!IsDigest64(dig)) continue;
+
+                    if (!map.TryGetValue((currentRole, currentTier), out var existing))
+                        map[(currentRole, currentTier)] = new ModelInfo("", dig);
+                    else
+                        map[(currentRole, currentTier)] = existing with { Digest = dig };
+                }
+            }
+        }
+
+        // Drop incomplete entries
+        var pruned = map.Where(kv => !string.IsNullOrWhiteSpace(kv.Value.Tag) && !string.IsNullOrWhiteSpace(kv.Value.Digest))
+                        .ToDictionary(k => k.Key, v => v.Value);
+
+        return pruned.Count == 0 ? null : pruned;
+    }
+
+    public static bool VerifyAgainstTags(Dictionary<(string role, string tier), ModelInfo> pinned, OllamaTags tags)
+    {
+        var live = new Dictionary<string, string>(StringComparer.Ordinal);
+
+        foreach (var m in tags.Models)
+        {
+            if (string.IsNullOrWhiteSpace(m.Name) || string.IsNullOrWhiteSpace(m.Digest)) continue;
+            live[m.Name] = NormalizeDigest(m.Digest);
+        }
+
+        foreach (var kv in pinned.Values)
+        {
+            if (!live.TryGetValue(kv.Tag, out var got)) return false;
+            if (!string.Equals(got, kv.Digest, StringComparison.Ordinal)) return false;
+        }
+
+        return true;
+    }
+
+    private static string Scalar(string s)
+    {
+        s = s.Trim();
+        if (s.Length >= 2 && s[0] == '"' && s[^1] == '"') s = s[1..^1];
+        return s.Trim();
+    }
+
+    private static string NormalizeDigest(string s)
+    {
+        s = s.Trim().Trim('"').ToLowerInvariant();
+        return s.StartsWith("sha256:", StringComparison.Ordinal) ? s["sha256:".Length..] : s;
+    }
+
+    private static bool IsDigest64(string s)
+        => s.Length == 64 && s.All(ch => (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f'));
+}
+
+// --------------------------- Ollama NDJSON parsing ---------------------------
+
+internal static class OllamaNdjson
+{
+    public static string? TryExtractDelta(string jsonLine)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(jsonLine);
+            if (doc.RootElement.TryGetProperty("message", out var msg) &&
+                msg.ValueKind == JsonValueKind.Object &&
+                msg.TryGetProperty("content", out var content) &&
+                content.ValueKind == JsonValueKind.String)
+            {
+                var s = content.GetString();
+                return string.IsNullOrEmpty(s) ? null : s;
+            }
+        }
+        catch { /* ignore */ }
+
+        return null;
+    }
+}
+
+// Ollama request/response DTOs
+internal sealed record OllamaVersion([property: JsonPropertyName("version")] string Version);
+
+internal sealed record OllamaTags([property: JsonPropertyName("models")] List<OllamaModel> Models);
+
+internal sealed record OllamaModel(
+    [property: JsonPropertyName("name")] string? Name,
+    [property: JsonPropertyName("digest")] string? Digest
+);
+
+internal sealed record OllamaChatRequest(string model, List<OllamaMessage> messages, bool stream);
+
+internal sealed record OllamaMessage(string role, string content);
+
+// --------------------------- DB ---------------------------
+
+internal static class Db
+{
+    public static SqliteConnection Open(string dbPath)
+    {
+        var csb = new SqliteConnectionStringBuilder
+        {
+            DataSource = dbPath,
+            Mode = SqliteOpenMode.ReadWriteCreate,
+            Cache = SqliteCacheMode.Shared
+        };
+
+        return new SqliteConnection(csb.ToString());
+    }
+
+    public static async Task EnsureInitializedAsync(string dbPath)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(dbPath)!);
+
+        await using var conn = Open(dbPath);
+        await conn.OpenAsync();
+
+        await ExecAsync(conn, "PRAGMA journal_mode=WAL;");
+        await ExecAsync(conn, "PRAGMA synchronous=NORMAL;");
+        await ExecAsync(conn, "PRAGMA foreign_keys=ON;");
+        await ExecAsync(conn, "PRAGMA busy_timeout=5000;");
+
+        await ExecAsync(conn, """
+            CREATE TABLE IF NOT EXISTS meta (
+              key   TEXT PRIMARY KEY,
+              value TEXT NOT NULL
+            );
+            """);
+
+        await ExecAsync(conn, """
+            INSERT INTO meta(key,value) VALUES('schema_version','1')
+              ON CONFLICT(key) DO NOTHING;
+            """);
+
+        await ExecAsync(conn, """
+            CREATE TABLE IF NOT EXISTS conversations (
+              id           INTEGER PRIMARY KEY AUTOINCREMENT,
+              created_utc   TEXT NOT NULL,
+              title        TEXT NOT NULL,
+              role         TEXT NOT NULL,
+              tier         TEXT NOT NULL,
+              model_tag    TEXT NOT NULL,
+              model_digest TEXT NOT NULL
+            );
+            """);
+
+        await ExecAsync(conn, """
+            CREATE TABLE IF NOT EXISTS messages (
+              id              INTEGER PRIMARY KEY AUTOINCREMENT,
+              conversation_id INTEGER NOT NULL,
+              created_utc      TEXT NOT NULL,
+              sender          TEXT NOT NULL,
+              content         TEXT NOT NULL,
+              meta_json       TEXT NULL,
+              FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+            );
+            """);
+
+        await ExecAsync(conn, "CREATE INDEX IF NOT EXISTS idx_messages_convo ON messages(conversation_id, id);");
+        await ExecAsync(conn, "CREATE INDEX IF NOT EXISTS idx_conversations_created ON conversations(created_utc DESC);");
+    }
+
+    public static async Task<int> InsertConversationAsync(SqliteConnection conn, string createdUtc, string role, string tier, string title, string tag, string digest)
+    {
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            INSERT INTO conversations(created_utc,title,role,tier,model_tag,model_digest)
+            VALUES($created,$title,$role,$tier,$tag,$digest);
+            SELECT last_insert_rowid();
+            """;
+        cmd.Parameters.AddWithValue("$created", createdUtc);
+        cmd.Parameters.AddWithValue("$title", title);
+        cmd.Parameters.AddWithValue("$role", role);
+        cmd.Parameters.AddWithValue("$tier", tier);
+        cmd.Parameters.AddWithValue("$tag", tag);
+        cmd.Parameters.AddWithValue("$digest", digest);
+
+        var obj = await cmd.ExecuteScalarAsync();
+        return Convert.ToInt32(obj);
+    }
+
+    public static async Task<int> InsertMessageAsync(SqliteConnection conn, int conversationId, string createdUtc, string sender, string content, string? metaJson)
+    {
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            INSERT INTO messages(conversation_id,created_utc,sender,content,meta_json)
+            VALUES($cid,$created,$sender,$content,$meta);
+            SELECT last_insert_rowid();
+            """;
+        cmd.Parameters.AddWithValue("$cid", conversationId);
+        cmd.Parameters.AddWithValue("$created", createdUtc);
+        cmd.Parameters.AddWithValue("$sender", sender);
+        cmd.Parameters.AddWithValue("$content", content);
+        cmd.Parameters.AddWithValue("$meta", (object?)metaJson ?? DBNull.Value);
+
+        var obj = await cmd.ExecuteScalarAsync();
+        return Convert.ToInt32(obj);
+    }
+
+    public static async Task UpdateMessageContentAsync(SqliteConnection conn, int messageId, string content)
+    {
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = "UPDATE messages SET content=$c WHERE id=$id;";
+        cmd.Parameters.AddWithValue("$c", content);
+        cmd.Parameters.AddWithValue("$id", messageId);
+        await cmd.ExecuteNonQueryAsync();
+    }
+
+    public static async Task<ConversationDto?> GetConversationAsync(SqliteConnection conn, int id)
+    {
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT id,created_utc,title,role,tier,model_tag,model_digest
+            FROM conversations
+            WHERE id=$id
+            LIMIT 1;
+            """;
+        cmd.Parameters.AddWithValue("$id", id);
+
+        await using var r = await cmd.ExecuteReaderAsync();
+        if (!await r.ReadAsync()) return null;
+
+        return new ConversationDto(
+            Id: r.GetInt32(0),
+            CreatedUtc: r.GetString(1),
+            Title: r.GetString(2),
+            Role: r.GetString(3),
+            Tier: r.GetString(4),
+            ModelTag: r.GetString(5),
+            ModelDigest: r.GetString(6)
+        );
+    }
+
+    public static async Task<List<MessageDto>> GetMessagesAsync(SqliteConnection conn, int conversationId)
+    {
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT id,created_utc,sender,content,meta_json
+            FROM messages
+            WHERE conversation_id=$cid
+            ORDER BY id ASC;
+            """;
+        cmd.Parameters.AddWithValue("$cid", conversationId);
+
+        var list = new List<MessageDto>();
+        await using var r = await cmd.ExecuteReaderAsync();
+        while (await r.ReadAsync())
+        {
+            list.Add(new MessageDto(
+                Id: r.GetInt32(0),
+                CreatedUtc: r.GetString(1),
+                Sender: r.GetString(2),
+                Content: r.GetString(3),
+                MetaJson: r.IsDBNull(4) ? null : r.GetString(4)
+            ));
+        }
+        return list;
+    }
+
+    public static async Task<List<ConversationDto>> ListConversationsAsync(SqliteConnection conn, int limit, int offset, string q)
+    {
+        var hasQ = !string.IsNullOrWhiteSpace(q);
+
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = hasQ
+            ? """
+              SELECT id,created_utc,title,role,tier,model_tag,model_digest
+              FROM conversations
+              WHERE title LIKE $q
+              ORDER BY id DESC
+              LIMIT $limit OFFSET $offset;
+              """
+            : """
+              SELECT id,created_utc,title,role,tier,model_tag,model_digest
+              FROM conversations
+              ORDER BY id DESC
+              LIMIT $limit OFFSET $offset;
+              """;
+
+        if (hasQ) cmd.Parameters.AddWithValue("$q", $"%{q}%");
+        cmd.Parameters.AddWithValue("$limit", limit);
+        cmd.Parameters.AddWithValue("$offset", offset);
+
+        var list = new List<ConversationDto>();
+        await using var r = await cmd.ExecuteReaderAsync();
+        while (await r.ReadAsync())
+        {
+            list.Add(new ConversationDto(
+                Id: r.GetInt32(0),
+                CreatedUtc: r.GetString(1),
+                Title: r.GetString(2),
+                Role: r.GetString(3),
+                Tier: r.GetString(4),
+                ModelTag: r.GetString(5),
+                ModelDigest: r.GetString(6)
+            ));
+        }
+
+        return list;
+    }
+
+    public static async Task<bool> UpdateConversationTitleAsync(SqliteConnection conn, int id, string title)
+    {
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = "UPDATE conversations SET title=$t WHERE id=$id;";
+        cmd.Parameters.AddWithValue("$t", title);
+        cmd.Parameters.AddWithValue("$id", id);
+        var n = await cmd.ExecuteNonQueryAsync();
+        return n > 0;
+    }
+
+    public static async Task ExecAsync(SqliteConnection conn, string sql)
+    {
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = sql;
+        await cmd.ExecuteNonQueryAsync();
+    }
+
+    public static async Task<string?> ScalarAsync(SqliteConnection conn, string sql)
+    {
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = sql;
+        var obj = await cmd.ExecuteScalarAsync();
+        return obj?.ToString();
+    }
 }
