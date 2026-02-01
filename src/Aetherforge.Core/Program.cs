@@ -4,6 +4,7 @@ using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text;
 using System.Text.Json;
+using Aetherforge.Contracts; // Import canonical API contracts
 using System.Text.Json.Serialization;
 
 namespace Aetherforge.Core;
@@ -119,7 +120,8 @@ public sealed class Program
                 ollama = new { reachable = ollamaReachable, version = ollamaVersion },
                 pins = new
                 {
-                    pinned_yaml_path = @"D:\Aetherforge\config\pinned.yaml",
+                    // Report the effective pinned.yaml path rather than a hard‑coded Windows path
+                    pinned_yaml_path = PinnedPath,
                     pins_match = pinsMatch,
                     model_digests_match = modelDigestsMatch,
                     detail = pinsDetail
@@ -143,7 +145,14 @@ public sealed class Program
                 return ApiError.Failed("PIN_MISSING", "Pinned model map is missing", hint: "Ensure config/pinned.yaml exists.");
 
             if (!pins.TryGetValue((role, tier), out var model))
-                return ApiError.BadRequest(new ErrorResponse("PIN_NO_MATCH", $"No pinned model for role={role} tier={tier}", hint: "Update pinned.yaml model mapping."));
+                // Avoid using named arguments on ErrorResponse to prevent CS1739.  The optional parameters
+                // (detail, hint) can be provided positionally instead.
+                return ApiError.BadRequest(new ErrorResponse(
+                    "PIN_NO_MATCH",
+                    $"No pinned model for role={role} tier={tier}",
+                    null,
+                    "Update pinned.yaml model mapping."
+                ));
 
             var title = (req.Title ?? "").Trim();
             if (title.Length == 0) title = $"{role}-{tier}";
@@ -188,16 +197,20 @@ public sealed class Program
         });
 
         // ---------------------- PATCH /v1/conversations/{id} (title only) ----------------------
-        app.MapMethods("/v1/conversations/{id:int}", new[] { "PATCH" }, async (int id, ConversationPatchRequest req) =>
+        // Use MapPatch instead of MapMethods with a constant array.  This avoids repeatedly allocating
+        // a new string array on each call and satisfies CA1861 and IDE0300 warnings.
+        app.MapPatch("/v1/conversations/{id:int}", async (int id, ConversationPatchRequest req) =>
         {
-            var title = (req.Title ?? "").Trim();
-            if (title.Length == 0) return ApiError.BadRequest(new ErrorResponse("BAD_REQUEST", "Title is required"));
+            var title = (req.Title ?? string.Empty).Trim();
+            if (title.Length == 0)
+                return ApiError.BadRequest(new ErrorResponse("BAD_REQUEST", "Title is required"));
 
             await using var conn = Db.Open(DbPath);
             await conn.OpenAsync();
 
             var updated = await Db.UpdateConversationTitleAsync(conn, id, title);
-            if (!updated) return ApiError.NotFound("NOT_FOUND", $"Conversation {id} not found");
+            if (!updated)
+                return ApiError.NotFound("NOT_FOUND", $"Conversation {id} not found");
 
             var convo = await Db.GetConversationAsync(conn, id);
             return Results.Json(convo, options: JsonOpts);
@@ -239,10 +252,11 @@ public sealed class Program
 
             // Build Ollama chat request from DB history (simple replay)
             var history = await Db.GetMessagesAsync(conn, req.ConversationId);
+            // Construct OllamaChatRequest using positional arguments to avoid named argument mismatch.
             var ollamaReq = new OllamaChatRequest(
-                model: convo.ModelTag,
-                messages: history.Select(m => new OllamaMessage(m.Sender == "assistant" ? "assistant" : "user", m.Content)).ToList(),
-                stream: true
+                convo.ModelTag,
+                history.Select(m => new OllamaMessage(m.Sender == "assistant" ? "assistant" : "user", m.Content)).ToList(),
+                true
             );
 
             var assistantBuf = new StringBuilder();
@@ -260,8 +274,8 @@ public sealed class Program
                     await Sse.WriteEventAsync(http.Response, "error", new ErrorResponse(
                         "OLLAMA_ERROR",
                         $"Ollama returned {(int)resp.StatusCode}",
-                        detail: await SafeReadAsync(resp),
-                        hint: "Verify Ollama is running and the model tag exists."
+                        await SafeReadAsync(resp),
+                        "Verify Ollama is running and the model tag exists."
                     ), http.RequestAborted);
                     return Results.Empty;
                 }
@@ -269,9 +283,13 @@ public sealed class Program
                 await using var stream = await resp.Content.ReadAsStreamAsync(http.RequestAborted);
                 using var reader = new StreamReader(stream, Encoding.UTF8);
 
-                while (!reader.EndOfStream && !http.RequestAborted.IsCancellationRequested)
+                // Avoid using EndOfStream which can cause synchronous blocking.  Instead, read lines until
+                // ReadLineAsync returns null indicating EOF.  Check for cancellation separately.
+                while (!http.RequestAborted.IsCancellationRequested)
                 {
                     var line = await reader.ReadLineAsync();
+                    // null indicates end of stream per StreamReader.ReadLineAsync contract
+                    if (line is null) break;
                     if (string.IsNullOrWhiteSpace(line)) continue;
 
                     var delta = OllamaNdjson.TryExtractDelta(line);
@@ -305,8 +323,8 @@ public sealed class Program
                 await Sse.WriteEventAsync(http.Response, "error", new ErrorResponse(
                     "CHAT_FAILED",
                     "Chat failed",
-                    detail: $"{ex.GetType().Name}: {ex.Message}",
-                    hint: "Check Core logs and Ollama status."
+                    $"{ex.GetType().Name}: {ex.Message}",
+                    "Check Core logs and Ollama status."
                 ), CancellationToken.None);
 
                 return Results.Empty;
@@ -339,13 +357,16 @@ public sealed class Program
             var jsonPath = Path.Combine(outDir, $"{convo.Id}.{slug}.json");
 
             // JSON export (schema v1)
+            // Construct the export using positional arguments.  Parameter names are PascalCase but we avoid
+            // named arguments to prevent naming rule violations.  The JsonPropertyName attributes on
+            // the record types preserve the expected snake_case JSON keys.
             var export = new ConversationExportV1(
-                schema_version: 1,
-                generated_utc: DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"),
-                core_version: "unknown",
-                conversation: new ExportConversation(convo.Id, convo.CreatedUtc, convo.Title, convo.Role, convo.Tier),
-                model: new ExportModel(convo.ModelTag, convo.ModelDigest),
-                messages: msgs.Select(m => new ExportMessage(m.Id, m.CreatedUtc, m.Sender, m.Content, m.MetaJson)).ToList()
+                1,
+                DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"),
+                "unknown",
+                new ExportConversation(convo.Id, convo.CreatedUtc, convo.Title, convo.Role, convo.Tier),
+                new ExportModel(convo.ModelTag, convo.ModelDigest),
+                msgs.Select(m => new ExportMessage(m.Id, m.CreatedUtc, m.Sender, m.Content, m.MetaJson)).ToList()
             );
 
             var jsonText = JsonSerializer.Serialize(export, JsonOpts);
@@ -391,49 +412,53 @@ public sealed class Program
 }
 
 // --------------------------- DTOs ---------------------------
+// The API request/response DTOs are defined in the Aetherforge.Contracts project.
+// We intentionally omit them here to avoid duplication. See Contracts.cs for:
+//   ConversationCreateRequest
+//   ConversationPatchRequest
+//   ChatRequest
+//   ConversationDto
+//   MessageDto
+//   ConversationWithMessagesDto
+//   ConversationListResponse
 
-public sealed record ConversationCreateRequest(string Role, string Tier, string? Title);
-public sealed record ConversationPatchRequest(string? Title);
-public sealed record ChatRequest([property: JsonPropertyName("conversation_id")] int ConversationId, string Content);
-
-public sealed record ConversationDto(
-    int Id,
-    [property: JsonPropertyName("created_utc")] string CreatedUtc,
-    string Title,
-    string Role,
-    string Tier,
-    [property: JsonPropertyName("model_tag")] string ModelTag,
-    [property: JsonPropertyName("model_digest")] string ModelDigest
+// Export schema v1
+// Use PascalCase property names to satisfy naming rules.  Use JsonPropertyName attributes to preserve
+// the snake_case field names expected by the schema.  These record definitions are internal to the
+// core service and mirror the export format defined in the spec.
+public sealed record ConversationExportV1(
+    [property: JsonPropertyName("schema_version")] int SchemaVersion,
+    [property: JsonPropertyName("generated_utc")] string GeneratedUtc,
+    [property: JsonPropertyName("core_version")] string CoreVersion,
+    [property: JsonPropertyName("conversation")] ExportConversation Conversation,
+    [property: JsonPropertyName("model")] ExportModel Model,
+    [property: JsonPropertyName("messages")] List<ExportMessage> Messages
 );
 
-public sealed record MessageDto(
-    int Id,
+public sealed record ExportConversation(
+    [property: JsonPropertyName("id")] int Id,
     [property: JsonPropertyName("created_utc")] string CreatedUtc,
-    string Sender,
-    string Content,
+    [property: JsonPropertyName("title")] string Title,
+    [property: JsonPropertyName("role")] string Role,
+    [property: JsonPropertyName("tier")] string Tier
+);
+
+public sealed record ExportModel(
+    [property: JsonPropertyName("tag")] string Tag,
+    [property: JsonPropertyName("digest")] string Digest
+);
+
+public sealed record ExportMessage(
+    [property: JsonPropertyName("id")] int Id,
+    [property: JsonPropertyName("created_utc")] string CreatedUtc,
+    [property: JsonPropertyName("sender")] string Sender,
+    [property: JsonPropertyName("content")] string Content,
     [property: JsonPropertyName("meta_json")] string? MetaJson
 );
 
-public sealed record ConversationWithMessagesDto(ConversationDto Conversation, List<MessageDto> Messages);
-
-public sealed record ConversationListResponse(List<ConversationDto> Items, int Limit, int Offset, string? Q);
-
-// Export schema v1
-public sealed record ConversationExportV1(
-    int schema_version,
-    string generated_utc,
-    string core_version,
-    ExportConversation conversation,
-    ExportModel model,
-    List<ExportMessage> messages
-);
-
-public sealed record ExportConversation(int id, string created_utc, string title, string role, string tier);
-public sealed record ExportModel(string tag, string digest);
-public sealed record ExportMessage(int id, string created_utc, string sender, string content, string? meta_json);
-
 // Error model
-public sealed record ErrorResponse(string code, string message, string? detail = null, string? hint = null);
+// The canonical ErrorResponse type is defined in Aetherforge.Contracts.  The ApiError
+// helpers below rely on that definition; see Contracts.cs for the record definition.
 
 // --------------------------- Helpers ---------------------------
 
@@ -494,14 +519,25 @@ internal sealed class BoundaryPolicy
 
         if (!IsDescendant(full, _exportsRoot))
         {
-            deny = new ErrorResponse("BOUNDARY_DENY", "Write denied outside exports root", detail: full, hint: $"Allowed root: {_exportsRoot}");
+            // Provide detail and hint positionally to avoid named argument mismatch.
+            deny = new ErrorResponse(
+                "BOUNDARY_DENY",
+                "Write denied outside exports root",
+                full,
+                $"Allowed root: {_exportsRoot}"
+            );
             return false;
         }
 
         // Best-effort reparse/symlink block on the *existing* path segments
         if (HasReparsePointInPath(full))
         {
-            deny = new ErrorResponse("BOUNDARY_DENY", "Write denied due to reparse point/symlink in path", detail: full);
+            deny = new ErrorResponse(
+                "BOUNDARY_DENY",
+                "Write denied due to reparse point/symlink in path",
+                full,
+                null
+            );
             return false;
         }
 
@@ -768,9 +804,16 @@ internal sealed record OllamaModel(
     [property: JsonPropertyName("digest")] string? Digest
 );
 
-internal sealed record OllamaChatRequest(string model, List<OllamaMessage> messages, bool stream);
+internal sealed record OllamaChatRequest(
+    [property: JsonPropertyName("model")] string Model,
+    [property: JsonPropertyName("messages")] List<OllamaMessage> Messages,
+    [property: JsonPropertyName("stream")] bool Stream
+);
 
-internal sealed record OllamaMessage(string role, string content);
+internal sealed record OllamaMessage(
+    [property: JsonPropertyName("role")] string Role,
+    [property: JsonPropertyName("content")] string Content
+);
 
 // --------------------------- DB ---------------------------
 
