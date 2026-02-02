@@ -1,3 +1,5 @@
+# scripts/commands/start.ps1
+
 [CmdletBinding(PositionalBinding = $false)]
 param(
   [switch] $Help,
@@ -9,15 +11,9 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 if ($Help) {
-@"
-Usage:
-  aether start [args...]
-
-Alias for: aether dev-core
-"@ | Write-Host
+  "Usage: aether start [args...] (temp alias for aether dev-core)" | Write-Host
   exit 0
 }
 
-$root = $PSScriptRoot
-$bin  = Split-Path $root -Parent
-& (Join-Path $bin "dev-core.ps1") @Args
+& (Join-Path $PSScriptRoot "dev-core.ps1") @Args
+exit $LASTEXITCODE

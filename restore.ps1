@@ -1,3 +1,5 @@
+# ~/scripts/commands/restore.ps1
+
 [CmdletBinding(PositionalBinding = $false)]
 param(
   [switch] $Help

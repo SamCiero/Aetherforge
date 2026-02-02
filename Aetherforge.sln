@@ -78,9 +78,12 @@ Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "commands", "commands", "{65
 	ProjectSection(SolutionItems) = preProject
 		dev-core.ps1 = dev-core.ps1
 		doctor.ps1 = doctor.ps1
+		export.ps1 = export.ps1
+		rebuild.ps1 = rebuild.ps1
 		restore.ps1 = restore.ps1
 		start.ps1 = start.ps1
 		status.ps1 = status.ps1
+		test.ps1 = test.ps1
 	EndProjectSection
 EndProject
 Global

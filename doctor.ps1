@@ -1,3 +1,5 @@
+# ~/scripts/commands/doctor.ps1
+
 [CmdletBinding(PositionalBinding = $false)]
 param(
   [switch] $Help
