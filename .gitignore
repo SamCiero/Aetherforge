@@ -1,32 +1,154 @@
+################################################################################
+# Aetherforge (.NET / VS 2026 / WSL hybrid) - .gitignore
+# Goal: ignore generated artifacts, keep real source, keep /scripts, keep configs.
+################################################################################
 
-exports/
+#------------------------------------------------------------------------------
+# Repo scripts (committed source)
+#------------------------------------------------------------------------------
+!/scripts/
+!/scripts/*.ps1
+!/scripts/*.cmd
 
-# keep repo root bin scripts (launcher, helpers)
-!bin/
-!bin/**
+# If someone accidentally recreates repo-root bin as "scripts", ignore it.
+# (Build outputs already ignore **/bin/ below.)
+/bin/
 
+#------------------------------------------------------------------------------
+# Visual Studio / MSBuild / .NET build outputs
+#------------------------------------------------------------------------------
+**/bin/
+**/obj/
+**/out/
+**/artifacts/
+**/TestResults/
+**/BenchmarkDotNet.Artifacts/
+**/*.log
 
-# logs: ignore everything except bootstrap status snapshot
-logs/
-!logs/
-logs/**
-!logs/bootstrap/
-!logs/bootstrap/status.json
+# Rider / ReSharper
+.idea/
+*.sln.iml
+_ReSharper*/
+*.[Rr]e[Ss]harper
+*.DotSettings.user
 
-# build outputs
-
-# build outputs
-
-# build outputs
-bin/
-obj/
+# VS caches / user settings
 .vs/
-TestResults/
+**/.vs/
 *.user
+*.rsuser
 *.suo
+*.userosscache
+*.sln.docstates
+*.VC.db
+*.VC.VC.opendb
 
-# allow repo scripts in root bin
-!/bin/
-!/bin/*.cmd
-!/bin/*.ps1
+# Build / publish / pack
+**/*.nupkg
+**/*.snupkg
+**/*.symbols.nupkg
+**/*.appx
+**/*.appxbundle
+**/*.msix
+**/*.msixbundle
+**/*.appinstaller
+**/*.pdb
+**/*.iobj
+**/*.ipdb
 
+#------------------------------------------------------------------------------
+# NuGet (keep project-level config; ignore local/package caches)
+#------------------------------------------------------------------------------
+# Packages restored by NuGet should not be committed
+/packages/
+**/packages/
+
+# User-specific NuGet settings (rarely should be committed)
+NuGet.Config.user
+nuget.config.user
+
+#------------------------------------------------------------------------------
+# OS / tooling noise
+#------------------------------------------------------------------------------
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# macOS
+.DS_Store
+
+# Linux
+*~
+*.swp
+*.swo
+.*.swp
+
+#------------------------------------------------------------------------------
+# VS Code (keep workspace config, ignore local state)
+#------------------------------------------------------------------------------
+!.vscode/
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+.vscode/*.log
+.vscode/ipch/
+.vscode/.ropeproject/
+
+#------------------------------------------------------------------------------
+# Local runtime data (Aetherforge-specific)
+#------------------------------------------------------------------------------
+# If you generate exports locally, ignore by default.
+# If you want a committed placeholder, add exports/.gitkeep and unignore it below.
+exports/
+!exports/.gitkeep
+!exports/README.md
+
+# Local logs (if you create these)
+logs/
+**/logs/
+*.etl
+*.dmp
+
+# Local DB / runtime state if it ever lands under repo paths
+**/*.sqlite
+**/*.sqlite3
+**/*.db
+**/*.db-shm
+**/*.db-wal
+**/*.sqlite-shm
+**/*.sqlite-wal
+
+#------------------------------------------------------------------------------
+# Secrets / local overrides (keep canonical config templates)
+#------------------------------------------------------------------------------
+# Keep config templates & pinned.yaml in repo; ignore local/private variants.
+**/*.secret.*
+**/*.secrets.*
+**/*.local.*
+**/*.private.*
+**/appsettings.*.Development.json
+**/appsettings.*.Local.json
+
+# If you store user-specific settings here, ignore only the local variant:
+# config/settings.local.yaml
+# config/pinned.local.yaml
+
+#------------------------------------------------------------------------------
+# Misc “don’t commit random outputs”
+#------------------------------------------------------------------------------
+*.tmp
+*.bak
+*.old
+*.orig
+*.cache
+*.pid
+*.tgz
+*.zip
+*.7z
+
+################################################################################
+# End
+################################################################################

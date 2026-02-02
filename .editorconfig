@@ -6,3 +6,21 @@ end_of_line = crlf
 insert_final_newline = true
 indent_style = space
 indent_size = 4
+
+# Keep diffs clean and avoid accidental whitespace churn.
+trim_trailing_whitespace = true
+
+# Optional: keep tab semantics consistent when pasting code.
+tab_width = 4
+
+[*.{ps1,cmd,yaml,yml,json,md}]
+charset = utf-8
+end_of_line = crlf
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+[*.sh]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true

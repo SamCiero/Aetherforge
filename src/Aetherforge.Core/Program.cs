@@ -28,6 +28,9 @@ public sealed class Program
         WriteIndented = false
     };
 
+    // Reuse for short, best-effort probes (e.g., /v1/status). For streaming chat we use a dedicated client.
+    private static readonly HttpClient StatusHttp = new() { Timeout = TimeSpan.FromSeconds(2) };
+
     public static async Task Main(string[] args)
     {
         var builder = WebApplication.CreateBuilder(args);
@@ -53,12 +56,11 @@ public sealed class Program
 
             try
             {
-                using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(2) };
-                var ver = await http.GetFromJsonAsync<OllamaVersion>($"{OllamaBaseUrl}/api/version");
+                var ver = await StatusHttp.GetFromJsonAsync<OllamaVersion>($"{OllamaBaseUrl}/api/version");
                 ollamaReachable = ver is not null && !string.IsNullOrWhiteSpace(ver.Version);
                 ollamaVersion = ver?.Version;
                 if (ollamaReachable)
-                    tags = await http.GetFromJsonAsync<OllamaTags>($"{OllamaBaseUrl}/api/tags");
+                    tags = await StatusHttp.GetFromJsonAsync<OllamaTags>($"{OllamaBaseUrl}/api/tags");
             }
             catch { /* best-effort */ }
 
@@ -112,27 +114,19 @@ public sealed class Program
             }
             catch { /* best-effort */ }
 
-            var payload = new
-            {
-                schema_version = 1,
-                captured_utc = capturedUtc,
-                core = new { reachable = true, base_url = CoreBindUrl },
-                ollama = new { reachable = ollamaReachable, version = ollamaVersion },
-                pins = new
-                {
-                    // Report the effective pinned.yaml path rather than a hard‑coded Windows path
-                    pinned_yaml_path = PinnedPath,
-                    pins_match = pinsMatch,
-                    model_digests_match = modelDigestsMatch,
-                    detail = pinsDetail
-                },
-                db = new { path = DbPath, healthy = dbHealthy, error = dbError },
-                gpu = new { visible = gpuVisible, evidence = gpuEvidence },
-                tailnet = new { serve_enabled = false, published_port = (int?)null },
-                files = new { settings_exists = File.Exists(SettingsPath), pinned_exists = File.Exists(PinnedPath) }
-            };
+            var status = new StatusResponse(
+                1,
+                capturedUtc,
+                new StatusCoreInfo(true, CoreBindUrl),
+                new StatusOllamaInfo(ollamaReachable, ollamaVersion),
+                new StatusPinsInfo(PinnedPath, pinsMatch, modelDigestsMatch, pinsDetail),
+                new StatusDbInfo(DbPath, dbHealthy, dbError),
+                new StatusGpuInfo(gpuVisible, gpuEvidence),
+                new StatusTailnetInfo(false, null),
+                new StatusFilesInfo(File.Exists(SettingsPath), File.Exists(PinnedPath))
+            );
 
-            return Results.Json(payload, options: JsonOpts);
+            return Results.Json(status, options: JsonOpts);
         });
 
         // ---------------------- POST /v1/conversations ----------------------
@@ -145,8 +139,6 @@ public sealed class Program
                 return ApiError.Failed("PIN_MISSING", "Pinned model map is missing", hint: "Ensure config/pinned.yaml exists.");
 
             if (!pins.TryGetValue((role, tier), out var model))
-                // Avoid using named arguments on ErrorResponse to prevent CS1739.  The optional parameters
-                // (detail, hint) can be provided positionally instead.
                 return ApiError.BadRequest(new ErrorResponse(
                     "PIN_NO_MATCH",
                     $"No pinned model for role={role} tier={tier}",
@@ -197,20 +189,16 @@ public sealed class Program
         });
 
         // ---------------------- PATCH /v1/conversations/{id} (title only) ----------------------
-        // Use MapPatch instead of MapMethods with a constant array.  This avoids repeatedly allocating
-        // a new string array on each call and satisfies CA1861 and IDE0300 warnings.
         app.MapPatch("/v1/conversations/{id:int}", async (int id, ConversationPatchRequest req) =>
         {
-            var title = (req.Title ?? string.Empty).Trim();
-            if (title.Length == 0)
-                return ApiError.BadRequest(new ErrorResponse("BAD_REQUEST", "Title is required"));
+            var title = (req.Title ?? "").Trim();
+            if (title.Length == 0) return ApiError.BadRequest(new ErrorResponse("BAD_REQUEST", "Title is required"));
 
             await using var conn = Db.Open(DbPath);
             await conn.OpenAsync();
 
             var updated = await Db.UpdateConversationTitleAsync(conn, id, title);
-            if (!updated)
-                return ApiError.NotFound("NOT_FOUND", $"Conversation {id} not found");
+            if (!updated) return ApiError.NotFound("NOT_FOUND", $"Conversation {id} not found");
 
             var convo = await Db.GetConversationAsync(conn, id);
             return Results.Json(convo, options: JsonOpts);
@@ -237,27 +225,27 @@ public sealed class Program
             var nowUtc = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
             _ = await Db.InsertMessageAsync(conn, req.ConversationId, nowUtc, "user", req.Content, metaJson: null);
 
-            // Create assistant placeholder message to get message_id for meta event
+            // Build Ollama chat request from DB history (simple replay). Important: fetch history
+            // BEFORE inserting the assistant placeholder message, so the placeholder doesn't get
+            // echoed back into the prompt.
+            var history = await Db.GetMessagesAsync(conn, req.ConversationId);
+
+            // Create assistant placeholder message to get message_id for SSE events
             var assistantCreatedUtc = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
             var assistantId = await Db.InsertMessageAsync(conn, req.ConversationId, assistantCreatedUtc, "assistant", content: "", metaJson: null);
 
             // Emit meta
-            await Sse.WriteEventAsync(http.Response, "meta", new
-            {
-                conversation_id = req.ConversationId,
-                message_id = assistantId,
-                model_tag = convo.ModelTag,
-                model_digest = convo.ModelDigest
-            }, http.RequestAborted);
+            await Sse.WriteEventAsync(
+                http.Response,
+                "meta",
+                new SseMetaEvent(req.ConversationId, assistantId, convo.ModelTag, convo.ModelDigest),
+                JsonOpts,
+                http.RequestAborted);
 
-            // Build Ollama chat request from DB history (simple replay)
-            var history = await Db.GetMessagesAsync(conn, req.ConversationId);
-            // Construct OllamaChatRequest using positional arguments to avoid named argument mismatch.
             var ollamaReq = new OllamaChatRequest(
                 convo.ModelTag,
                 history.Select(m => new OllamaMessage(m.Sender == "assistant" ? "assistant" : "user", m.Content)).ToList(),
-                true
-            );
+                true);
 
             var assistantBuf = new StringBuilder();
 
@@ -274,21 +262,22 @@ public sealed class Program
                     await Sse.WriteEventAsync(http.Response, "error", new ErrorResponse(
                         "OLLAMA_ERROR",
                         $"Ollama returned {(int)resp.StatusCode}",
-                        await SafeReadAsync(resp),
-                        "Verify Ollama is running and the model tag exists."
-                    ), http.RequestAborted);
+                        Detail: await SafeReadAsync(resp),
+                        Hint: "Verify Ollama is running and the model tag exists."
+                    ),
+                    JsonOpts,
+                    http.RequestAborted);
                     return Results.Empty;
                 }
 
                 await using var stream = await resp.Content.ReadAsStreamAsync(http.RequestAborted);
                 using var reader = new StreamReader(stream, Encoding.UTF8);
 
-                // Avoid using EndOfStream which can cause synchronous blocking.  Instead, read lines until
-                // ReadLineAsync returns null indicating EOF.  Check for cancellation separately.
+                // Avoid StreamReader.EndOfStream which can cause unintended sync blocking when no data
+                // is buffered. ReadLineAsync returns null at EOF.
                 while (!http.RequestAborted.IsCancellationRequested)
                 {
                     var line = await reader.ReadLineAsync();
-                    // null indicates end of stream per StreamReader.ReadLineAsync contract
                     if (line is null) break;
                     if (string.IsNullOrWhiteSpace(line)) continue;
 
@@ -297,17 +286,23 @@ public sealed class Program
 
                     assistantBuf.Append(delta);
 
-                    await Sse.WriteEventAsync(http.Response, "delta", new
-                    {
-                        message_id = assistantId,
-                        delta_text = delta
-                    }, http.RequestAborted);
+                    await Sse.WriteEventAsync(
+                        http.Response,
+                        "delta",
+                        new SseDeltaEvent(assistantId, delta),
+                        JsonOpts,
+                        http.RequestAborted);
                 }
 
                 // Persist assistant final content
                 await Db.UpdateMessageContentAsync(conn, assistantId, assistantBuf.ToString());
 
-                await Sse.WriteEventAsync(http.Response, "done", new { message_id = assistantId }, http.RequestAborted);
+                await Sse.WriteEventAsync(
+                    http.Response,
+                    "done",
+                    new SseDoneEvent(assistantId),
+                    JsonOpts,
+                    http.RequestAborted);
                 return Results.Empty;
             }
             catch (OperationCanceledException)
@@ -323,9 +318,11 @@ public sealed class Program
                 await Sse.WriteEventAsync(http.Response, "error", new ErrorResponse(
                     "CHAT_FAILED",
                     "Chat failed",
-                    $"{ex.GetType().Name}: {ex.Message}",
-                    "Check Core logs and Ollama status."
-                ), CancellationToken.None);
+                    Detail: $"{ex.GetType().Name}: {ex.Message}",
+                    Hint: "Check Core logs and Ollama status."
+                ),
+                JsonOpts,
+                CancellationToken.None);
 
                 return Results.Empty;
             }
@@ -357,17 +354,13 @@ public sealed class Program
             var jsonPath = Path.Combine(outDir, $"{convo.Id}.{slug}.json");
 
             // JSON export (schema v1)
-            // Construct the export using positional arguments.  Parameter names are PascalCase but we avoid
-            // named arguments to prevent naming rule violations.  The JsonPropertyName attributes on
-            // the record types preserve the expected snake_case JSON keys.
             var export = new ConversationExportV1(
                 1,
                 DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"),
                 "unknown",
                 new ExportConversation(convo.Id, convo.CreatedUtc, convo.Title, convo.Role, convo.Tier),
                 new ExportModel(convo.ModelTag, convo.ModelDigest),
-                msgs.Select(m => new ExportMessage(m.Id, m.CreatedUtc, m.Sender, m.Content, m.MetaJson)).ToList()
-            );
+                msgs.Select(m => new ExportMessage(m.Id, m.CreatedUtc, m.Sender, m.Content, m.MetaJson)).ToList());
 
             var jsonText = JsonSerializer.Serialize(export, JsonOpts);
             await File.WriteAllTextAsync(jsonPath, jsonText, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
@@ -395,14 +388,17 @@ public sealed class Program
 
             await File.WriteAllTextAsync(mdPath, md.ToString(), new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
 
-            return Results.Json(new { ok = true, dir = outDir, md = mdPath, json = jsonPath }, options: JsonOpts);
+            return Results.Json(new ExportResponse(true, outDir, mdPath, jsonPath), options: JsonOpts);
         });
 
         app.Run();
     }
 
     private static string Env(string name, string fallback)
-        => string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(name)) ? fallback : Environment.GetEnvironmentVariable(name)!;
+    {
+        var v = Environment.GetEnvironmentVariable(name);
+        return string.IsNullOrWhiteSpace(v) ? fallback : v;
+    }
 
     private static async Task<string?> SafeReadAsync(HttpResponseMessage resp)
     {
@@ -422,10 +418,82 @@ public sealed class Program
 //   ConversationWithMessagesDto
 //   ConversationListResponse
 
+// --------------------------- Responses internal to Core ---------------------------
+
+internal sealed record StatusResponse(
+    [property: JsonPropertyName("schema_version")] int SchemaVersion,
+    [property: JsonPropertyName("captured_utc")] string CapturedUtc,
+    [property: JsonPropertyName("core")] StatusCoreInfo Core,
+    [property: JsonPropertyName("ollama")] StatusOllamaInfo Ollama,
+    [property: JsonPropertyName("pins")] StatusPinsInfo Pins,
+    [property: JsonPropertyName("db")] StatusDbInfo Db,
+    [property: JsonPropertyName("gpu")] StatusGpuInfo Gpu,
+    [property: JsonPropertyName("tailnet")] StatusTailnetInfo Tailnet,
+    [property: JsonPropertyName("files")] StatusFilesInfo Files
+);
+
+internal sealed record StatusCoreInfo(
+    [property: JsonPropertyName("reachable")] bool Reachable,
+    [property: JsonPropertyName("base_url")] string BaseUrl
+);
+
+internal sealed record StatusOllamaInfo(
+    [property: JsonPropertyName("reachable")] bool Reachable,
+    [property: JsonPropertyName("version")] string? Version
+);
+
+internal sealed record StatusPinsInfo(
+    [property: JsonPropertyName("pinned_yaml_path")] string PinnedYamlPath,
+    [property: JsonPropertyName("pins_match")] bool? PinsMatch,
+    [property: JsonPropertyName("model_digests_match")] bool? ModelDigestsMatch,
+    [property: JsonPropertyName("detail")] string? Detail
+);
+
+internal sealed record StatusDbInfo(
+    [property: JsonPropertyName("path")] string Path,
+    [property: JsonPropertyName("healthy")] bool Healthy,
+    [property: JsonPropertyName("error")] string? Error
+);
+
+internal sealed record StatusGpuInfo(
+    [property: JsonPropertyName("visible")] bool Visible,
+    [property: JsonPropertyName("evidence")] string? Evidence
+);
+
+internal sealed record StatusTailnetInfo(
+    [property: JsonPropertyName("serve_enabled")] bool ServeEnabled,
+    [property: JsonPropertyName("published_port")] int? PublishedPort
+);
+
+internal sealed record StatusFilesInfo(
+    [property: JsonPropertyName("settings_exists")] bool SettingsExists,
+    [property: JsonPropertyName("pinned_exists")] bool PinnedExists
+);
+
+internal sealed record SseMetaEvent(
+    [property: JsonPropertyName("conversation_id")] int ConversationId,
+    [property: JsonPropertyName("message_id")] int MessageId,
+    [property: JsonPropertyName("model_tag")] string ModelTag,
+    [property: JsonPropertyName("model_digest")] string ModelDigest
+);
+
+internal sealed record SseDeltaEvent(
+    [property: JsonPropertyName("message_id")] int MessageId,
+    [property: JsonPropertyName("delta_text")] string DeltaText
+);
+
+internal sealed record SseDoneEvent(
+    [property: JsonPropertyName("message_id")] int MessageId
+);
+
+internal sealed record ExportResponse(
+    [property: JsonPropertyName("ok")] bool Ok,
+    [property: JsonPropertyName("dir")] string Dir,
+    [property: JsonPropertyName("md")] string Md,
+    [property: JsonPropertyName("json")] string Json
+);
+
 // Export schema v1
-// Use PascalCase property names to satisfy naming rules.  Use JsonPropertyName attributes to preserve
-// the snake_case field names expected by the schema.  These record definitions are internal to the
-// core service and mirror the export format defined in the spec.
 public sealed record ConversationExportV1(
     [property: JsonPropertyName("schema_version")] int SchemaVersion,
     [property: JsonPropertyName("generated_utc")] string GeneratedUtc,
@@ -519,25 +587,14 @@ internal sealed class BoundaryPolicy
 
         if (!IsDescendant(full, _exportsRoot))
         {
-            // Provide detail and hint positionally to avoid named argument mismatch.
-            deny = new ErrorResponse(
-                "BOUNDARY_DENY",
-                "Write denied outside exports root",
-                full,
-                $"Allowed root: {_exportsRoot}"
-            );
+            deny = new ErrorResponse("BOUNDARY_DENY", "Write denied outside exports root", Detail: full, Hint: $"Allowed root: {_exportsRoot}");
             return false;
         }
 
         // Best-effort reparse/symlink block on the *existing* path segments
         if (HasReparsePointInPath(full))
         {
-            deny = new ErrorResponse(
-                "BOUNDARY_DENY",
-                "Write denied due to reparse point/symlink in path",
-                full,
-                null
-            );
+            deny = new ErrorResponse("BOUNDARY_DENY", "Write denied due to reparse point/symlink in path", Detail: full);
             return false;
         }
 
@@ -613,23 +670,12 @@ internal static class Slug
 
 internal static class Sse
 {
-    public static async Task WriteEventAsync(HttpResponse resp, string eventName, object payload, CancellationToken ct)
+    public static async Task WriteEventAsync(HttpResponse resp, string eventName, object payload, JsonSerializerOptions jsonOptions, CancellationToken ct)
     {
-        var json = JsonSerializer.Serialize(payload, ProgramJson.Options);
+        var json = JsonSerializer.Serialize(payload, jsonOptions);
         await resp.WriteAsync($"event: {eventName}\n", ct);
         await resp.WriteAsync($"data: {json}\n\n", ct);
         await resp.Body.FlushAsync(ct);
-    }
-
-    // tiny indirection so we can serialize consistently without referencing Program.JsonOpts directly
-    private static class ProgramJson
-    {
-        public static readonly JsonSerializerOptions Options = new()
-        {
-            PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
-            DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
-            WriteIndented = false
-        };
     }
 }
 
@@ -650,7 +696,13 @@ internal static class Proc
         using var p = Process.Start(psi);
         if (p is null) return (false, "");
 
-        p.WaitForExit(1500);
+        // Avoid potential hangs when reading redirected output from a long-running process.
+        if (!p.WaitForExit(1500))
+        {
+            try { p.Kill(entireProcessTree: true); } catch { /* best-effort */ }
+        }
+
+        // With the process exited (or killed), these reads won't block indefinitely.
         var outp = (p.StandardOutput.ReadToEnd() ?? "");
         return (p.ExitCode == 0, outp);
     }
@@ -807,13 +859,11 @@ internal sealed record OllamaModel(
 internal sealed record OllamaChatRequest(
     [property: JsonPropertyName("model")] string Model,
     [property: JsonPropertyName("messages")] List<OllamaMessage> Messages,
-    [property: JsonPropertyName("stream")] bool Stream
-);
+    [property: JsonPropertyName("stream")] bool Stream);
 
 internal sealed record OllamaMessage(
     [property: JsonPropertyName("role")] string Role,
-    [property: JsonPropertyName("content")] string Content
-);
+    [property: JsonPropertyName("content")] string Content);
 
 // --------------------------- DB ---------------------------
 
@@ -1047,3 +1097,4 @@ internal static class Db
         return obj?.ToString();
     }
 }
+cmd /c "for /d /r %i in (bin,obj) do @if exist ""%i"" rd /s /q ""%i"""
