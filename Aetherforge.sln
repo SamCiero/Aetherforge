@@ -29,15 +29,6 @@ Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "docs", "docs", "{9BD68711-2
 		docs\spec.md = docs\spec.md
 	EndProjectSection
 EndProject
-Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "bin", "bin", "{47E2A52D-6F59-4570-A702-28373F1FCF90}"
-	ProjectSection(SolutionItems) = preProject
-		bin\aether.cmd = bin\aether.cmd
-		bin\aether.ps1 = bin\aether.ps1
-		bin\aetherforge.cmd = bin\aetherforge.cmd
-		bin\aetherforge.ps1 = bin\aetherforge.ps1
-		bin\dev-core.ps1 = bin\dev-core.ps1
-	EndProjectSection
-EndProject
 Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "config", "config", "{FE0FAE8C-1C6C-43E1-8855-B97326417993}"
 	ProjectSection(SolutionItems) = preProject
 		config\pinned.yaml = config\pinned.yaml
@@ -76,6 +67,20 @@ Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "scripts", "scripts", "{A546
 	ProjectSection(SolutionItems) = preProject
 		wsl\core\scripts\run-dev.sh = wsl\core\scripts\run-dev.sh
 		wsl\core\scripts\smoke.sh = wsl\core\scripts\smoke.sh
+	EndProjectSection
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "scripts", "scripts", "{80F29DB3-7693-42FE-BF25-DDE8420B84EA}"
+	ProjectSection(SolutionItems) = preProject
+		scripts\aether.ps1 = scripts\aether.ps1
+	EndProjectSection
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "commands", "commands", "{65FB2894-3B2A-4B78-95A0-9BDE534E4F58}"
+	ProjectSection(SolutionItems) = preProject
+		dev-core.ps1 = dev-core.ps1
+		doctor.ps1 = doctor.ps1
+		restore.ps1 = restore.ps1
+		start.ps1 = start.ps1
+		status.ps1 = status.ps1
 	EndProjectSection
 EndProject
 Global
@@ -162,6 +167,7 @@ Global
 		{E72332D5-6896-44BB-98F4-FC41436BC523} = {7BEE7B09-5DC6-4F40-90AC-DF5C4B3004DA}
 		{11C03A8D-321F-443E-9492-EBCCC4AF05CE} = {E91FBCF5-E3C1-412A-9714-0B94AFF45A62}
 		{A5462AC9-2DFC-4984-9ABD-D9024E1F81E5} = {11C03A8D-321F-443E-9492-EBCCC4AF05CE}
+		{65FB2894-3B2A-4B78-95A0-9BDE534E4F58} = {80F29DB3-7693-42FE-BF25-DDE8420B84EA}
 	EndGlobalSection
 	GlobalSection(ExtensibilityGlobals) = postSolution
 		SolutionGuid = {61ED3199-A638-4C46-9BD3-1F223F9F10D3}
