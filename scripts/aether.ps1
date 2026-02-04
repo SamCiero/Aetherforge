@@ -12,7 +12,6 @@ $ErrorActionPreference = 'Stop'
 # ------------------------- Helpers -------------------------
 
 function Get-ExitCode {
-  # Prefer LASTEXITCODE if it is set; fall back to $? for pure PowerShell failures.
   if (Test-Path variable:LASTEXITCODE) { return $LASTEXITCODE }
   if ($?) { return 0 } else { return 1 }
 }
@@ -44,13 +43,16 @@ function Try-ReadCommentHelpSynopsis {
   param([string] $Path)
 
   try {
-    $head = Get-Content -LiteralPath $Path -TotalCount 250 -ErrorAction Stop
+    # Force array to avoid scalar-unwrapping (.Count on string)
+    $head = @(Get-Content -LiteralPath $Path -TotalCount 250 -ErrorAction Stop)
   } catch {
     return $null
   }
 
+  if ($head.Count -eq 0) { return $null }
+
   $start = $null
-  $end = $null
+  $end   = $null
 
   for ($i = 0; $i -lt $head.Count; $i++) {
     if ($head[$i] -match '^\s*<#') { $start = $i; break }
@@ -62,7 +64,7 @@ function Try-ReadCommentHelpSynopsis {
   }
   if ($null -eq $end) { return $null }
 
-  $block = $head[$start..$end]
+  $block = @($head[$start..$end])
 
   $synLine = $null
   for ($k = 0; $k -lt $block.Count; $k++) {
@@ -92,24 +94,27 @@ function Try-GetUsageFromHelpSwitchChild {
     return $null
   }
 
-  $raw = Remove-Ansi $raw
+  $raw = Remove-Ansi ([string]$raw)
   $lines = @($raw -split "\r?\n" | ForEach-Object { $_.TrimEnd() })
 
-  # Return a short snippet: first 6 non-empty lines, preferring a "Usage:" block if present.
-  $usageIdx = ($lines | Select-String -Pattern '^\s*Usage\s*:' -AllMatches | Select-Object -First 1).LineNumber
-  if ($usageIdx) {
-    $start = [Math]::Max(0, $usageIdx - 1)
+  # NOTE: Do NOT use -SimpleMatch with a regex pattern.
+  $usageMatch = ($lines | Select-String -Pattern '^\s*Usage\s*:' | Select-Object -First 1)
+  if ($usageMatch) {
+    $usageIdx = $usageMatch.LineNumber # 1-based
+    $start = [Math]::Max(0, $usageIdx - 1) # convert to 0-based
     $snippet = @()
+
     for ($i = $start; $i -lt $lines.Count; $i++) {
       $t = $lines[$i].Trim()
       if (-not $t -and $snippet.Count -gt 0) { break }
       if ($t) { $snippet += $t }
-      if ($snippet.Count -ge 8) { break }
+      if ($snippet.Count -ge 12) { break }
     }
+
     if ($snippet.Count -gt 0) { return ($snippet -join "`n") }
   }
 
-  $snip = @($lines | Where-Object { $_.Trim() } | Select-Object -First 6)
+  $snip = @($lines | Where-Object { $_.Trim() } | Select-Object -First 8)
   if ($snip.Count -gt 0) { return ($snip -join "`n") }
   return $null
 }
@@ -143,7 +148,6 @@ function Show-Usage {
 
   $items = New-Object System.Collections.Generic.List[object]
 
-  # Built-in help command
   $items.Add([pscustomobject]@{
     Name = "help"
     Synopsis = "List available commands and show per-command usage."
@@ -166,6 +170,14 @@ Available commands:
 
   foreach ($it in $items) {
     Write-Host ("  {0,-12} {1}" -f $it.Name, $it.Synopsis)
+  }
+
+  Write-Host ""
+  Write-Host "Per-command usage:"
+  foreach ($it in $items) {
+    Write-Host ""
+    Write-Host ("[{0}]" -f $it.Name)
+    Write-Host $it.Usage
   }
 }
 
@@ -191,14 +203,12 @@ function Show-CommandHelp {
 
   $path = $CommandMap[$cmd]
 
-  # Prefer a child process '-Help' to avoid in-process 'exit' from command scripts.
   $usage = Try-GetUsageFromHelpSwitchChild -Path $path
   if ($usage) {
     Write-Host $usage
     exit 0
   }
 
-  # Fallback: synopsis only.
   $syn = Try-ReadCommentHelpSynopsis -Path $path
   if ($syn) {
     Write-Host ("{0}: {1}" -f $cmd, $syn)
