@@ -1,5 +1,10 @@
 # D:/Aetherforge/scripts/aether.ps1
 
+<#
+.SYNOPSIS
+  Dispatcher for scripts/commands/*.ps1 (aether <command> [args...]).
+#>
+
 [CmdletBinding(PositionalBinding = $false)]
 param(
   [Parameter(ValueFromRemainingArguments = $true)]
@@ -13,7 +18,7 @@ $ErrorActionPreference = 'Stop'
 
 function Get-ExitCode {
   if (Test-Path variable:LASTEXITCODE) { return $LASTEXITCODE }
-  if ($?) { return 0 } else { return 1 }
+  return (if ($?) { 0 } else { 1 })
 }
 
 function Get-PowerShellExe {
@@ -22,57 +27,59 @@ function Get-PowerShellExe {
 }
 
 function Get-CommandMap {
-  param([string] $CommandsDir)
+  param([Parameter(Mandatory = $true)][string] $CommandsDir)
 
   $map = @{}
   if (-not (Test-Path -LiteralPath $CommandsDir)) { return $map }
 
-  Get-ChildItem -LiteralPath $CommandsDir -Filter "*.ps1" -File |
-    ForEach-Object {
-      $name = [IO.Path]::GetFileNameWithoutExtension($_.Name).ToLowerInvariant()
-      $map[$name] = $_.FullName
-    }
+  Get-ChildItem -LiteralPath $CommandsDir -Filter "*.ps1" -File | ForEach-Object {
+    $name = [IO.Path]::GetFileNameWithoutExtension($_.Name).ToLowerInvariant()
+    $map[$name] = $_.FullName
+  }
 
   return $map
 }
 
 function Try-ReadCommentHelpSynopsis {
-  param([string] $Path)
+  param([Parameter(Mandatory = $true)][string] $Path)
 
+  [string[]] $head = @()
   try {
     $head = @(Get-Content -LiteralPath $Path -TotalCount 250 -ErrorAction Stop)
   } catch {
     return $null
   }
 
-  if (-not $head) { return $null }
+  if (-not $head -or $head.Length -eq 0) { return $null }
 
-  $start = $null
-  $end   = $null
+  $start = -1
+  $end   = -1
 
-  for ($i = 0; $i -lt $head.Count; $i++) {
+  for ($i = 0; $i -lt $head.Length; $i++) {
     if ($head[$i] -match '^\s*<#') { $start = $i; break }
   }
-  if ($null -eq $start) { return $null }
+  if ($start -lt 0) { return $null }
 
-  for ($j = $start + 1; $j -lt $head.Count; $j++) {
+  for ($j = $start + 1; $j -lt $head.Length; $j++) {
     if ($head[$j] -match '#>\s*$') { $end = $j; break }
   }
-  if ($null -eq $end) { return $null }
+  if ($end -lt 0) { return $null }
 
-  $block = @($head[$start..$end])
+  [string[]] $block = @($head[$start..$end])
 
-  $synLine = $null
-  for ($k = 0; $k -lt $block.Count; $k++) {
+  $synLine = -1
+  for ($k = 0; $k -lt $block.Length; $k++) {
     if ($block[$k] -match '^\s*\.SYNOPSIS\s*$') { $synLine = $k; break }
   }
-  if ($null -eq $synLine) { return $null }
+  if ($synLine -lt 0) { return $null }
 
   $lines = New-Object System.Collections.Generic.List[string]
-  for ($m = $synLine + 1; $m -lt $block.Count; $m++) {
+  for ($m = $synLine + 1; $m -lt $block.Length; $m++) {
     $ln = $block[$m]
-    if ($ln -match '^\s*\.\w+') { break }
+    if ($ln -match '^\s*\.\w+') { break } # next directive
     $t = ($ln -replace '^\s+','').TrimEnd()
+    if ($t -eq "#>") { break }
+    $t = ($t -replace '\s*#>\s*$','').TrimEnd()
     if ($t) { $lines.Add($t) }
   }
 
@@ -84,8 +91,8 @@ function Try-ReadCommentHelpSynopsis {
 
 function Show-UsageSummary {
   param(
-    [hashtable] $CommandMap,
-    [string] $CommandsDir
+    [Parameter(Mandatory = $true)][hashtable] $CommandMap,
+    [Parameter(Mandatory = $true)][string] $CommandsDir
   )
 
   Write-Host @"
@@ -99,6 +106,7 @@ Commands:
 "@
 
   Write-Host ("  {0,-12} {1}" -f "help", "List available commands and show per-command usage.")
+
   foreach ($k in (@($CommandMap.Keys) | Sort-Object)) {
     $syn = Try-ReadCommentHelpSynopsis -Path $CommandMap[$k]
     if (-not $syn) { $syn = "<no synopsis>" }
@@ -112,9 +120,9 @@ Commands:
 
 function Show-CommandHelp {
   param(
-    [string] $Command,
-    [hashtable] $CommandMap,
-    [string] $CommandsDir
+    [Parameter(Mandatory = $true)][string] $Command,
+    [Parameter(Mandatory = $true)][hashtable] $CommandMap,
+    [Parameter(Mandatory = $true)][string] $CommandsDir
   )
 
   $cmd = $Command.ToLowerInvariant()
@@ -137,7 +145,7 @@ Usage:
   $path = $CommandMap[$cmd]
   $exe  = Get-PowerShellExe
 
-  # Run in a child process so 'exit' inside command scripts is safe.
+  # Child process: safe even if the command script calls 'exit'
   & $exe -NoProfile -ExecutionPolicy Bypass -File $path -Help
   exit (Get-ExitCode)
 }
@@ -147,18 +155,32 @@ Usage:
 $commandsDir = Join-Path $PSScriptRoot "commands"
 $cmdMap      = Get-CommandMap -CommandsDir $commandsDir
 
-$argv = if ($null -eq $CliArgs) { @() } else { @($CliArgs) }
+# Build arg vector deterministically (no if-expression assignments; no scalar collapse)
+[string[]] $cli = [string[]]$CliArgs
+if ($null -eq $cli) { $cli = @() }
 
-$sub  = if ($argv.Count -gt 0 -and $null -ne $argv[0]) { ($argv[0].ToString()).ToLowerInvariant() } else { "help" }
-$rest = if ($argv.Count -gt 1) { @($argv[1..($argv.Count - 1)]) } else { @() }
+$sub  = "help"
+[string[]] $rest = @()
 
-if ($sub -in @("-h", "--help")) { $sub = "help"; $rest = @() }
+if ($cli.Length -ge 1 -and $null -ne $cli[0] -and $cli[0].ToString().Trim().Length -gt 0) {
+  $sub = $cli[0].ToString().ToLowerInvariant()
+
+  if ($cli.Length -gt 1) {
+    $rest = [string[]]@($cli[1..($cli.Length - 1)])
+  }
+}
+
+if ($sub -in @("-h","--help")) {
+  $sub = "help"
+  $rest = @()
+}
 
 switch ($sub) {
   "help" {
-    if ($rest.Count -ge 1 -and $null -ne $rest[0]) {
+    if ($rest.Length -ge 1 -and $null -ne $rest[0] -and $rest[0].ToString().Trim().Length -gt 0) {
       Show-CommandHelp -Command ($rest[0].ToString()) -CommandMap $cmdMap -CommandsDir $commandsDir
     }
+
     Show-UsageSummary -CommandMap $cmdMap -CommandsDir $commandsDir
     exit 0
   }
