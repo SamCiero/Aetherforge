@@ -76,6 +76,7 @@ Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "scripts", "scripts", "{80F2
 EndProject
 Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "commands", "commands", "{65FB2894-3B2A-4B78-95A0-9BDE534E4F58}"
 	ProjectSection(SolutionItems) = preProject
+		scripts\commands\ask.ps1 = scripts\commands\ask.ps1
 		scripts\commands\dev-core.ps1 = scripts\commands\dev-core.ps1
 		scripts\commands\doctor.ps1 = scripts\commands\doctor.ps1
 		scripts\commands\export.ps1 = scripts\commands\export.ps1

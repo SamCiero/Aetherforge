@@ -1,3 +1,5 @@
+# D:/Aetherforge/scripts/aether.ps1
+
 [CmdletBinding(PositionalBinding = $false)]
 param(
   [Parameter(ValueFromRemainingArguments = $true)]
@@ -10,30 +12,22 @@ $ErrorActionPreference = 'Stop'
 # ------------------------- Helpers -------------------------
 
 function Get-ExitCode {
+  # Prefer LASTEXITCODE if it is set; fall back to $? for pure PowerShell failures.
   if (Test-Path variable:LASTEXITCODE) { return $LASTEXITCODE }
   if ($?) { return 0 } else { return 1 }
 }
 
 function Remove-Ansi([string] $s) {
-  return ($s -replace "`e\[[0-9;]*[A-Za-z]", "")
-}
-
-function Get-RepoRoot {
-  # Works even if invoked from elsewhere
-  try {
-    $p = (git -C $PSScriptRoot rev-parse --show-toplevel 2>$null).Trim()
-    if ($p) { return $p }
-  } catch {}
-  return (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+  return ($s -replace "`e\[[0-?]*[ -/]*[@-~]", "")
 }
 
 function Get-CommandMap {
   param([string] $CommandsDir)
 
   $map = @{}
-  if (-not (Test-Path $CommandsDir)) { return $map }
+  if (-not (Test-Path -LiteralPath $CommandsDir)) { return $map }
 
-  Get-ChildItem -Path $CommandsDir -Filter "*.ps1" -File | ForEach-Object {
+  Get-ChildItem -LiteralPath $CommandsDir -Filter "*.ps1" -File | ForEach-Object {
     $name = [IO.Path]::GetFileNameWithoutExtension($_.Name).ToLowerInvariant()
     $map[$name] = $_.FullName
   }
@@ -41,154 +35,201 @@ function Get-CommandMap {
   return $map
 }
 
+function Get-PowerShellExe {
+  if (Get-Command pwsh -ErrorAction SilentlyContinue) { return "pwsh" }
+  return "powershell"
+}
+
+function Try-ReadCommentHelpSynopsis {
+  param([string] $Path)
+
+  try {
+    $head = Get-Content -LiteralPath $Path -TotalCount 250 -ErrorAction Stop
+  } catch {
+    return $null
+  }
+
+  $start = $null
+  $end = $null
+
+  for ($i = 0; $i -lt $head.Count; $i++) {
+    if ($head[$i] -match '^\s*<#') { $start = $i; break }
+  }
+  if ($null -eq $start) { return $null }
+
+  for ($j = $start + 1; $j -lt $head.Count; $j++) {
+    if ($head[$j] -match '#>\s*$') { $end = $j; break }
+  }
+  if ($null -eq $end) { return $null }
+
+  $block = $head[$start..$end]
+
+  $synLine = $null
+  for ($k = 0; $k -lt $block.Count; $k++) {
+    if ($block[$k] -match '^\s*\.SYNOPSIS\s*$') { $synLine = $k; break }
+  }
+  if ($null -eq $synLine) { return $null }
+
+  $lines = New-Object System.Collections.Generic.List[string]
+  for ($m = $synLine + 1; $m -lt $block.Count; $m++) {
+    $ln = $block[$m]
+    if ($ln -match '^\s*\.\w+') { break }
+    $t = ($ln -replace '^\s+','').TrimEnd()
+    if ($t) { $lines.Add($t) }
+  }
+
+  if ($lines.Count -eq 0) { return $null }
+  return ($lines -join " ").Trim()
+}
+
+function Try-GetUsageFromHelpSwitchChild {
+  param([string] $Path)
+
+  $exe = Get-PowerShellExe
+  try {
+    $raw = & $exe -NoProfile -ExecutionPolicy Bypass -File $Path -Help 2>&1 | Out-String
+  } catch {
+    return $null
+  }
+
+  $raw = Remove-Ansi $raw
+  $lines = @($raw -split "\r?\n" | ForEach-Object { $_.TrimEnd() })
+
+  # Return a short snippet: first 6 non-empty lines, preferring a "Usage:" block if present.
+  $usageIdx = ($lines | Select-String -Pattern '^\s*Usage\s*:' -AllMatches | Select-Object -First 1).LineNumber
+  if ($usageIdx) {
+    $start = [Math]::Max(0, $usageIdx - 1)
+    $snippet = @()
+    for ($i = $start; $i -lt $lines.Count; $i++) {
+      $t = $lines[$i].Trim()
+      if (-not $t -and $snippet.Count -gt 0) { break }
+      if ($t) { $snippet += $t }
+      if ($snippet.Count -ge 8) { break }
+    }
+    if ($snippet.Count -gt 0) { return ($snippet -join "`n") }
+  }
+
+  $snip = @($lines | Where-Object { $_.Trim() } | Select-Object -First 6)
+  if ($snip.Count -gt 0) { return ($snip -join "`n") }
+  return $null
+}
+
+function Get-CommandMeta {
+  param(
+    [string] $Name,
+    [string] $Path
+  )
+
+  $syn = Try-ReadCommentHelpSynopsis -Path $Path
+  if (-not $syn) { $syn = "<no synopsis>" }
+
+  $usage = Try-GetUsageFromHelpSwitchChild -Path $Path
+  if (-not $usage) { $usage = "<no usage (add -Help)>" }
+
+  [pscustomobject]@{
+    Name = $Name
+    Synopsis = $syn
+    Usage = $usage
+  }
+}
+
+# ------------------------- help (dispatcher-owned) -------------------------
+
 function Show-Usage {
   param(
     [hashtable] $CommandMap,
     [string] $CommandsDir
   )
 
-@"
+  $items = New-Object System.Collections.Generic.List[object]
+
+  # Built-in help command
+  $items.Add([pscustomobject]@{
+    Name = "help"
+    Synopsis = "List available commands and show per-command usage."
+    Usage = "Usage:`n  aether help`n  aether help <command>"
+  })
+
+  foreach ($k in ($CommandMap.Keys | Sort-Object)) {
+    $items.Add((Get-CommandMeta -Name $k -Path $CommandMap[$k]))
+  }
+
+  Write-Host @"
 Usage:
   aether <command> [args...]
 
-Core commands:
-  aether status
-  aether start
-  aether dev-core
-  aether ask <prompt...> [-m <model>] [--json]
-
-More commands:
-  aether help
-  aether help <command>
-
-Notes:
-  - Canonical base URLs: http://127.0.0.1:<port> (avoid localhost for PowerShell web cmdlets)
-  - Commands directory: $CommandsDir
+Commands directory:
+  $CommandsDir
 
 Available commands:
-$(
-  ($CommandMap.Keys | Sort-Object | ForEach-Object { "  - $_" }) -join "`n"
-)
-"@ | Write-Host
+"@
+
+  foreach ($it in $items) {
+    Write-Host ("  {0,-12} {1}" -f $it.Name, $it.Synopsis)
+  }
 }
 
 function Show-CommandHelp {
   param(
     [string] $Command,
-    [hashtable] $CommandMap
+    [hashtable] $CommandMap,
+    [string] $CommandsDir
   )
 
   $cmd = $Command.ToLowerInvariant()
+
+  if ($cmd -eq "help") {
+    Write-Host "Usage:`n  aether help`n  aether help <command>"
+    exit 0
+  }
+
   if (-not $CommandMap.ContainsKey($cmd)) {
-    Write-Host "Unknown command: $Command"
-    return
+    Write-Host "Unknown command: $Command`n"
+    Show-Usage -CommandMap $CommandMap -CommandsDir $CommandsDir
+    exit 2
   }
 
-  # Convention: each command script can implement a -Help switch that prints its own usage.
-  & $CommandMap[$cmd] -Help
-  exit (Get-ExitCode)
-}
+  $path = $CommandMap[$cmd]
 
-# ------------------------- ask (inline) -------------------------
-
-function Invoke-OllamaGenerate {
-  param(
-    [Parameter(Mandatory = $true)] [string] $Prompt,
-    [string] $Model = "qwen2.5:7b-instruct",
-    [switch] $Json
-  )
-
-  $uri = "http://127.0.0.1:11434/api/generate"
-  $body = @{ model = $Model; prompt = $Prompt; stream = $false } | ConvertTo-Json -Compress -Depth 10
-
-  try {
-    $resp = Invoke-RestMethod -NoProxy -TimeoutSec 120 -Method Post -Uri $uri -ContentType "application/json" -Body $body
-    if ($Json) { return ($resp | ConvertTo-Json -Compress -Depth 10) }
-    return $resp.response
-  }
-  catch {
-    $env:PROMPT_B64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Prompt))
-    $env:MODEL = $Model
-
-    $bash = @'
-set -euo pipefail
-payload="$(python3 - <<'PY'
-import os,base64,json
-p=base64.b64decode(os.environ["PROMPT_B64"]).decode("utf-8")
-m=os.environ.get("MODEL","qwen2.5:7b-instruct")
-print(json.dumps({"model":m,"prompt":p,"stream":False}))
-PY
-)"
-printf '%s' "$payload" | curl -fsS http://127.0.0.1:11434/api/generate -H 'Content-Type: application/json' --data-binary @-
-'@
-    $bash = $bash.Replace("`r", "")
-    $raw = (wsl.exe -- bash -lc $bash) -join "`n"
-    $raw = Remove-Ansi $raw
-
-    if ($Json) { return $raw.Trim() }
-
-    try { return ((ConvertFrom-Json $raw).response) }
-    catch { return $raw.Trim() }
-  }
-}
-
-function Invoke-Ask {
-  param([string[]] $Rest)
-
-  $rest = @($Rest)
-  if ($rest.Count -lt 1) { throw "Usage: aether ask <prompt...> [-m <model>] [--json]" }
-
-  $model  = "qwen2.5:7b-instruct"
-  $asJson = $false
-
-  $i = 0
-  $promptParts = New-Object System.Collections.Generic.List[string]
-  while ($i -lt $rest.Count) {
-    $a = $rest[$i]
-    if ($a -in @("-m","--model")) {
-      if ($i + 1 -ge $rest.Count) { throw "Missing model after $a" }
-      $model = $rest[$i+1]
-      $i += 2
-      continue
-    }
-    if ($a -eq "--json") {
-      $asJson = $true
-      $i += 1
-      continue
-    }
-    $promptParts.Add($a)
-    $i += 1
+  # Prefer a child process '-Help' to avoid in-process 'exit' from command scripts.
+  $usage = Try-GetUsageFromHelpSwitchChild -Path $path
+  if ($usage) {
+    Write-Host $usage
+    exit 0
   }
 
-  $prompt = ($promptParts -join " ").Trim()
-  if (-not $prompt) { throw "Empty prompt." }
+  # Fallback: synopsis only.
+  $syn = Try-ReadCommentHelpSynopsis -Path $path
+  if ($syn) {
+    Write-Host ("{0}: {1}" -f $cmd, $syn)
+    exit 0
+  }
 
-  Invoke-OllamaGenerate -Prompt $prompt -Model $model -Json:$asJson
-  exit 0
+  Write-Host "No help available for '$cmd'. Add a -Help switch to: $path"
+  exit 1
 }
 
 # ------------------------- Dispatch -------------------------
 
-$repoRoot   = Get-RepoRoot
 $commandsDir = Join-Path $PSScriptRoot "commands"
-$cmdMap     = Get-CommandMap -CommandsDir $commandsDir
+$cmdMap      = Get-CommandMap -CommandsDir $commandsDir
 
 $argv = @($Args)
 $sub  = if ($argv.Count -gt 0) { $argv[0].ToLowerInvariant() } else { "help" }
 $rest = if ($argv.Count -gt 1) { @($argv[1..($argv.Count-1)]) } else { @() }
 
-switch ($sub) {
-  "help"     { Show-Usage -CommandMap $cmdMap -CommandsDir $commandsDir; exit 0 }
-  "-h"       { Show-Usage -CommandMap $cmdMap -CommandsDir $commandsDir; exit 0 }
-  "--help"   { Show-Usage -CommandMap $cmdMap -CommandsDir $commandsDir; exit 0 }
+if ($sub -in @("-h","--help")) { $sub = "help"; $rest = @() }
 
-  "ask"      { Invoke-Ask -Rest $rest }
+switch ($sub) {
+  "help" {
+    if ($rest.Count -ge 1) {
+      Show-CommandHelp -Command $rest[0] -CommandMap $cmdMap -CommandsDir $commandsDir
+    }
+    Show-Usage -CommandMap $cmdMap -CommandsDir $commandsDir
+    exit 0
+  }
 
   default {
-    if ($sub -eq "help" -and $rest.Count -ge 1) {
-      Show-CommandHelp -Command $rest[0] -CommandMap $cmdMap
-    }
-
     if ($cmdMap.ContainsKey($sub)) {
       & $cmdMap[$sub] @rest
       exit (Get-ExitCode)

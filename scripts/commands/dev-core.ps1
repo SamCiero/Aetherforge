@@ -1,6 +1,9 @@
-# ~/scripts/commands/dev-core.ps1
+# D:/Aetherforge/scripts/commands/dev-core.ps1
 
-# scripts/commands/dev-core.ps1
+<#
+.SYNOPSIS
+  Start the Aetherforge.Core service in WSL using dotnet (optionally build and/or watch).
+#>
 
 [CmdletBinding(PositionalBinding = $false)]
 param(
@@ -20,20 +23,20 @@ $ErrorActionPreference = 'Stop'
 if ($Help) {
 @"
 Usage:
-  aether dev-core [--no-build] [--watch] [-- <extra dotnet args...>]
+  aether dev-core [-NoBuild] [-Watch] [-- <extra dotnet args...>]
 
 Description:
   Starts the Aetherforge.Core service in WSL (Ubuntu) using dotnet.
   This command is the implementation (not a forwarder).
 
 Flags:
-  --no-build   Skip 'dotnet build' before run.
-  --watch      Use 'dotnet watch run' instead of 'dotnet run'.
-  --           Everything after this is passed to dotnet.
+  -NoBuild   Skip 'dotnet build' before run.
+  -Watch     Use 'dotnet watch run' instead of 'dotnet run'.
+  --         Everything after this is passed to dotnet.
 
 Examples:
   aether dev-core
-  aether dev-core --watch
+  aether dev-core -Watch
   aether dev-core -- --urls http://127.0.0.1:8484
 "@ | Write-Host
   exit 0
@@ -56,6 +59,9 @@ $repoWsl = $repoWsl.Trim()
 
 if (-not $repoWsl) { throw "Failed to convert repo path to WSL path." }
 
+# Escape for bash single-quoted literal
+$repoWslEsc = ($repoWsl -replace "'", "'\''")
+
 # Base command
 $dotnetVerb = if ($Watch) { "watch run" } else { "run" }
 
@@ -65,22 +71,20 @@ $extra = @($Args)
 # Build first unless skipped
 if (-not $NoBuild) {
   Write-Host "Building (WSL): dotnet build .\Aetherforge.sln" -ForegroundColor Cyan
-  wsl.exe -- bash -lc "cd '$repoWsl' && dotnet build ./Aetherforge.sln"
+  wsl.exe -- bash -lc "cd '$repoWslEsc' && dotnet build ./Aetherforge.sln"
   if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 }
 
 Write-Host "Starting Core (WSL): dotnet $dotnetVerb --project ./src/Aetherforge.Core" -ForegroundColor Cyan
 
-# Build the final bash command
-# Note: join extra args safely; we treat them as already-formed dotnet args.
+# Quote pass-through args safely for bash.
 $extraJoined = ""
 if ($extra.Count -gt 0) {
-  # Escape single quotes for bash literal strings
-  $escaped = $extra | ForEach-Object { $_.Replace("'", "''") }
+  $escaped = $extra | ForEach-Object { "'" + ($_ -replace "'", "'\''") + "'" }
   $extraJoined = " " + ($escaped -join " ")
 }
 
-$bash = "cd '$repoWsl' && dotnet $dotnetVerb --project ./src/Aetherforge.Core$extraJoined"
+$bash = "cd '$repoWslEsc' && dotnet $dotnetVerb --project ./src/Aetherforge.Core$extraJoined"
 
 wsl.exe -- bash -lc $bash
 exit $LASTEXITCODE
