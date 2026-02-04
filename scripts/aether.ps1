@@ -43,23 +43,22 @@ function Try-ReadCommentHelpSynopsis {
   param([string] $Path)
 
   try {
-    # Force array to avoid scalar-unwrapping (.Count on string)
     $head = @(Get-Content -LiteralPath $Path -TotalCount 250 -ErrorAction Stop)
   } catch {
     return $null
   }
 
-  if ($head.Count -eq 0) { return $null }
+  if ($head.Length -eq 0) { return $null }
 
   $start = $null
   $end   = $null
 
-  for ($i = 0; $i -lt $head.Count; $i++) {
+  for ($i = 0; $i -lt $head.Length; $i++) {
     if ($head[$i] -match '^\s*<#') { $start = $i; break }
   }
   if ($null -eq $start) { return $null }
 
-  for ($j = $start + 1; $j -lt $head.Count; $j++) {
+  for ($j = $start + 1; $j -lt $head.Length; $j++) {
     if ($head[$j] -match '#>\s*$') { $end = $j; break }
   }
   if ($null -eq $end) { return $null }
@@ -67,13 +66,13 @@ function Try-ReadCommentHelpSynopsis {
   $block = @($head[$start..$end])
 
   $synLine = $null
-  for ($k = 0; $k -lt $block.Count; $k++) {
+  for ($k = 0; $k -lt $block.Length; $k++) {
     if ($block[$k] -match '^\s*\.SYNOPSIS\s*$') { $synLine = $k; break }
   }
   if ($null -eq $synLine) { return $null }
 
   $lines = New-Object System.Collections.Generic.List[string]
-  for ($m = $synLine + 1; $m -lt $block.Count; $m++) {
+  for ($m = $synLine + 1; $m -lt $block.Length; $m++) {
     $ln = $block[$m]
     if ($ln -match '^\s*\.\w+') { break }
     $t = ($ln -replace '^\s+','').TrimEnd()
@@ -97,25 +96,24 @@ function Try-GetUsageFromHelpSwitchChild {
   $raw = Remove-Ansi ([string]$raw)
   $lines = @($raw -split "\r?\n" | ForEach-Object { $_.TrimEnd() })
 
-  # NOTE: Do NOT use -SimpleMatch with a regex pattern.
   $usageMatch = ($lines | Select-String -Pattern '^\s*Usage\s*:' | Select-Object -First 1)
   if ($usageMatch) {
     $usageIdx = $usageMatch.LineNumber # 1-based
-    $start = [Math]::Max(0, $usageIdx - 1) # convert to 0-based
+    $start = [Math]::Max(0, $usageIdx - 1)
     $snippet = @()
 
-    for ($i = $start; $i -lt $lines.Count; $i++) {
+    for ($i = $start; $i -lt $lines.Length; $i++) {
       $t = $lines[$i].Trim()
-      if (-not $t -and $snippet.Count -gt 0) { break }
+      if (-not $t -and $snippet.Length -gt 0) { break }
       if ($t) { $snippet += $t }
-      if ($snippet.Count -ge 12) { break }
+      if ($snippet.Length -ge 12) { break }
     }
 
-    if ($snippet.Count -gt 0) { return ($snippet -join "`n") }
+    if ($snippet.Length -gt 0) { return ($snippet -join "`n") }
   }
 
   $snip = @($lines | Where-Object { $_.Trim() } | Select-Object -First 8)
-  if ($snip.Count -gt 0) { return ($snip -join "`n") }
+  if ($snip.Length -gt 0) { return ($snip -join "`n") }
   return $null
 }
 
@@ -147,14 +145,13 @@ function Show-Usage {
   )
 
   $items = New-Object System.Collections.Generic.List[object]
-
   $items.Add([pscustomobject]@{
     Name = "help"
     Synopsis = "List available commands and show per-command usage."
     Usage = "Usage:`n  aether help`n  aether help <command>"
   })
 
-  foreach ($k in ($CommandMap.Keys | Sort-Object)) {
+  foreach ($k in (@($CommandMap.Keys) | Sort-Object)) {
     $items.Add((Get-CommandMeta -Name $k -Path $CommandMap[$k]))
   }
 
@@ -225,14 +222,14 @@ $commandsDir = Join-Path $PSScriptRoot "commands"
 $cmdMap      = Get-CommandMap -CommandsDir $commandsDir
 
 $argv = @($Args)
-$sub  = if ($argv.Count -gt 0) { $argv[0].ToLowerInvariant() } else { "help" }
-$rest = if ($argv.Count -gt 1) { @($argv[1..($argv.Count-1)]) } else { @() }
+$sub  = if ($argv.Length -gt 0) { $argv[0].ToLowerInvariant() } else { "help" }
+$rest = if ($argv.Length -gt 1) { @($argv[1..($argv.Length-1)]) } else { @() }
 
 if ($sub -in @("-h","--help")) { $sub = "help"; $rest = @() }
 
 switch ($sub) {
   "help" {
-    if ($rest.Count -ge 1) {
+    if ($rest.Length -ge 1) {
       Show-CommandHelp -Command $rest[0] -CommandMap $cmdMap -CommandsDir $commandsDir
     }
     Show-Usage -CommandMap $cmdMap -CommandsDir $commandsDir
