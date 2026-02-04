@@ -11,12 +11,6 @@ D:\Aetherforge\
 ├─ global.json
 ├─ .github\
 │  └─ workflows\
-├─ bin\
-│  ├─ aether.cmd
-│  ├─ aether.ps1
-│  ├─ aetherforge.cmd
-│  ├─ aetherforge.ps1
-│  └─ dev-core.ps1
 ├─ config\
 │  ├─ pinned.yaml
 │  ├─ settings.yaml
@@ -25,6 +19,7 @@ D:\Aetherforge\
 │     ├─ coding.yaml
 │     └─ general.yaml
 ├─ docs\
+│  ├─ directory.md
 │  ├─ spec.md
 │  ├─ roadmap.md
 │  ├─ AetherChecklist.M0.md
@@ -39,6 +34,18 @@ D:\Aetherforge\
 │  └─ bootstrap\
 │     ├─ gpu_inference_evidence.txt
 │     └─ status.json
+├─ scripts\
+│  ├─ aether.ps1
+│  └─ commands\
+│     ├─ ask.ps1
+│     ├─ dev-core.ps1
+│     ├─ doctor.ps1
+│     ├─ export.ps1
+│     ├─ rebuild.ps1
+│     ├─ restore.ps1
+│     ├─ start.ps1
+│     ├─ status.ps1
+│     └─ test.ps1
 ├─ src\
 │  ├─ Aetherforge.Contracts\
 │  │  ├─ Aetherforge.Contracts.csproj
