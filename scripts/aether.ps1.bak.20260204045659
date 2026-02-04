@@ -3,7 +3,7 @@
 [CmdletBinding(PositionalBinding = $false)]
 param(
   [Parameter(ValueFromRemainingArguments = $true)]
-  [string[]] $CliArgs
+  [string[]] $Args
 )
 
 Set-StrictMode -Version Latest
@@ -147,7 +147,7 @@ Usage:
 $commandsDir = Join-Path $PSScriptRoot "commands"
 $cmdMap      = Get-CommandMap -CommandsDir $commandsDir
 
-$argv = if ($null -eq $CliArgs) { @() } else { @($CliArgs) }
+$argv = if ($null -eq $Args) { @() } else { @($Args) }
 
 $sub  = if ($argv.Count -gt 0 -and $null -ne $argv[0]) { ($argv[0].ToString()).ToLowerInvariant() } else { "help" }
 $rest = if ($argv.Count -gt 1) { @($argv[1..($argv.Count - 1)]) } else { @() }
