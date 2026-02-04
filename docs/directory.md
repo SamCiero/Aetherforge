@@ -19,6 +19,7 @@ D:\Aetherforge\
 │     ├─ coding.yaml
 │     └─ general.yaml
 ├─ docs\
+│  ├─ _script_template.ps1
 │  ├─ directory.md
 │  ├─ spec.md
 │  ├─ roadmap.md
