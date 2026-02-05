@@ -1,0 +1,132 @@
+schema_version: 1
+captured_utc: null # <UTC_ISO8601>
+
+# -----------------------------
+# Ports / binds (Phase 1)
+# -----------------------------
+ports:
+  core_bind_url: "http://127.0.0.1:8484"
+  ollama_base_url: "http://127.0.0.1:11434"
+
+# -----------------------------
+# Defaults (Phase 1)
+# -----------------------------
+defaults:
+  role: "general"   # general|coding|agent
+  tier: "fast"      # fast|thinking
+
+# -----------------------------
+# Profiles (system prompts)
+# -----------------------------
+profiles:
+  # WSL-view paths (Core runs in WSL today)
+  root_wsl: "/mnt/d/Aetherforge/config/profiles"
+  by_role:
+    general: "general.yaml"
+    coding: "coding.yaml"
+    agent:  "agent.yaml"
+
+# -----------------------------
+# Generation parameters per role/tier (stored now; applied later)
+# -----------------------------
+generation:
+  # Intended target: Ollama /api/chat "options" map (Phase 1+)
+  # Use nulls to avoid assumptions; fill later.
+  by_profile:
+    general:
+      fast:
+        temperature: null
+        top_p: null
+        top_k: null
+        num_ctx: null
+        num_predict: null
+        repeat_penalty: null
+        seed: null
+      thinking:
+        temperature: null
+        top_p: null
+        top_k: null
+        num_ctx: null
+        num_predict: null
+        repeat_penalty: null
+        seed: null
+
+    coding:
+      fast:
+        temperature: null
+        top_p: null
+        top_k: null
+        num_ctx: null
+        num_predict: null
+        repeat_penalty: null
+        seed: null
+      thinking:
+        temperature: null
+        top_p: null
+        top_k: null
+        num_ctx: null
+        num_predict: null
+        repeat_penalty: null
+        seed: null
+
+    agent:
+      fast:
+        temperature: null
+        top_p: null
+        top_k: null
+        num_ctx: null
+        num_predict: null
+        repeat_penalty: null
+        seed: null
+      thinking:
+        temperature: null
+        top_p: null
+        top_k: null
+        num_ctx: null
+        num_predict: null
+        repeat_penalty: null
+        seed: null
+
+# -----------------------------
+# Autostart (Phase 1)
+# -----------------------------
+autostart:
+  enabled: false
+  windows_scheduled_task_name: null # <TASK_NAME>
+
+# -----------------------------
+# Filesystem boundary allowlists (Phase 1 + Phase 2)
+# -----------------------------
+boundary:
+  # Explicit bridge rules: deny unknown mappings (spec requirement)
+  bridge_rules:
+    - windows_root: "D:\\Aetherforge"
+      wsl_root: "/mnt/d/Aetherforge"
+
+  # Allowlisted roots (minimum required set)
+  roots:
+    wsl:
+      config: "/mnt/d/Aetherforge/config"
+      exports: "/mnt/d/Aetherforge/exports"
+      logs: "/mnt/d/Aetherforge/logs"
+
+  # Enforcement toggles
+  block_reparse_points: true
+
+  # Writes allowed only under these roots
+  allow_write_under_wsl:
+    - "/mnt/d/Aetherforge/config"
+    - "/mnt/d/Aetherforge/exports"
+    - "/mnt/d/Aetherforge/logs"
+
+  # Reads allowed only under these roots (Phase 2 local_search); empty by default
+  allow_read_under_wsl: []
+
+# -----------------------------
+# Agent safety flags (Phase 2)
+# -----------------------------
+agent:
+  enabled: false
+  require_plan_approval: true
+  # Empty means: no tools permitted until explicitly allowlisted.
+  allow_tools: []
