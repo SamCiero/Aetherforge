@@ -33,8 +33,22 @@ public sealed class Program
 
     public static async Task Main(string[] args)
     {
+        // ---------------------- settings.yaml (load once) ----------------------
+        // Requires SettingsLoader.cs (YamlDotNet + UnderscoredNamingConvention) to exist in Aetherforge.Core.
+        var (settings, settingsErr) = SettingsLoader.TryLoad(SettingsPath);
+
+        // Precedence:
+        // - ports: settings.yaml > constants
+        // - exports root: env var (AETHERFORGE_EXPORTS_ROOT) > settings.yaml > default
+        var coreBindUrl = settings?.Ports?.CoreBindUrl ?? CoreBindUrl;
+        var ollamaBaseUrl = settings?.Ports?.OllamaBaseUrl ?? OllamaBaseUrl;
+
+        var exportsRoot = string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("AETHERFORGE_EXPORTS_ROOT"))
+            ? (settings?.Boundary?.Roots?.Wsl?.Exports ?? ExportsRoot)
+            : ExportsRoot;
+
         var builder = WebApplication.CreateBuilder(args);
-        builder.WebHost.UseUrls(CoreBindUrl);
+        builder.WebHost.UseUrls(coreBindUrl);
 
         var app = builder.Build();
 
@@ -42,7 +56,10 @@ public sealed class Program
         await Db.EnsureInitializedAsync(DbPath);
 
         var pins = Pins.TryLoadPinned(PinnedPath);
-        var policy = BoundaryPolicy.CreateDefault(SettingsPath, ExportsRoot);
+
+        var policy = settings is not null
+            ? BoundaryPolicy.FromSettings(settings, exportsRoot)
+            : BoundaryPolicy.CreateDefault(SettingsPath, exportsRoot);
 
         // --------------------------- /v1/status ---------------------------
         app.MapGet("/v1/status", async () =>
@@ -56,11 +73,11 @@ public sealed class Program
 
             try
             {
-                var ver = await StatusHttp.GetFromJsonAsync<OllamaVersion>($"{OllamaBaseUrl}/api/version");
+                var ver = await StatusHttp.GetFromJsonAsync<OllamaVersion>($"{ollamaBaseUrl}/api/version");
                 ollamaReachable = ver is not null && !string.IsNullOrWhiteSpace(ver.Version);
                 ollamaVersion = ver?.Version;
                 if (ollamaReachable)
-                    tags = await StatusHttp.GetFromJsonAsync<OllamaTags>($"{OllamaBaseUrl}/api/tags");
+                    tags = await StatusHttp.GetFromJsonAsync<OllamaTags>($"{ollamaBaseUrl}/api/tags");
             }
             catch { /* best-effort */ }
 
@@ -114,16 +131,27 @@ public sealed class Program
             }
             catch { /* best-effort */ }
 
+            // Settings validity (surface loader/validator result)
+            bool? settingsValid =
+                settingsErr is null
+                    ? (settings is not null ? true : (bool?)null)
+                    : false;
+
             var status = new StatusResponse(
                 1,
                 capturedUtc,
-                new StatusCoreInfo(true, CoreBindUrl),
+                new StatusCoreInfo(true, coreBindUrl),
                 new StatusOllamaInfo(ollamaReachable, ollamaVersion),
                 new StatusPinsInfo(PinnedPath, pinsMatch, modelDigestsMatch, pinsDetail),
                 new StatusDbInfo(DbPath, dbHealthy, dbError),
                 new StatusGpuInfo(gpuVisible, gpuEvidence),
                 new StatusTailnetInfo(false, null),
-                new StatusFilesInfo(File.Exists(SettingsPath), File.Exists(PinnedPath))
+                new StatusFilesInfo(
+                    File.Exists(SettingsPath),
+                    File.Exists(PinnedPath),
+                    settingsValid,
+                    settingsErr
+                )
             );
 
             return Results.Json(status, options: JsonOpts);
@@ -252,7 +280,7 @@ public sealed class Program
             try
             {
                 using var httpClient = new HttpClient { Timeout = Timeout.InfiniteTimeSpan };
-                using var msg = new HttpRequestMessage(HttpMethod.Post, $"{OllamaBaseUrl}/api/chat");
+                using var msg = new HttpRequestMessage(HttpMethod.Post, $"{ollamaBaseUrl}/api/chat");
                 msg.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/x-ndjson"));
                 msg.Content = new StringContent(JsonSerializer.Serialize(ollamaReq, JsonOpts), Encoding.UTF8, "application/json");
 
@@ -341,9 +369,9 @@ public sealed class Program
 
             // Resolve export dir: ExportsRoot/YYYY-MM-DD (UTC)
             var dateDir = DateTime.UtcNow.ToString("yyyy-MM-dd");
-            var outDir = Path.Combine(ExportsRoot, dateDir);
+            var outDir = Path.Combine(exportsRoot, dateDir);
 
-            // Boundary enforcement (exports only, minimal)
+            // Boundary enforcement (allowlisted roots)
             if (!policy.AllowWriteUnder(outDir, out var deny))
                 return ApiError.Forbidden(deny!);
 
@@ -467,7 +495,9 @@ internal sealed record StatusTailnetInfo(
 
 internal sealed record StatusFilesInfo(
     [property: JsonPropertyName("settings_exists")] bool SettingsExists,
-    [property: JsonPropertyName("pinned_exists")] bool PinnedExists
+    [property: JsonPropertyName("pinned_exists")] bool PinnedExists,
+    [property: JsonPropertyName("settings_valid")] bool? SettingsValid,
+    [property: JsonPropertyName("settings_error")] string? SettingsError
 );
 
 internal sealed record SseMetaEvent(
@@ -524,10 +554,6 @@ public sealed record ExportMessage(
     [property: JsonPropertyName("meta_json")] string? MetaJson
 );
 
-// Error model
-// The canonical ErrorResponse type is defined in Aetherforge.Contracts.  The ApiError
-// helpers below rely on that definition; see Contracts.cs for the record definition.
-
 // --------------------------- Helpers ---------------------------
 
 internal static class ApiError
@@ -565,18 +591,32 @@ internal static class Validation
 
 internal sealed class BoundaryPolicy
 {
-    private readonly string _exportsRoot;
+    private readonly IReadOnlyList<string> _writeRoots;
+    private readonly bool _blockReparsePoints;
 
-    private BoundaryPolicy(string exportsRoot)
+    private BoundaryPolicy(IReadOnlyList<string> writeRoots, bool blockReparsePoints)
     {
-        _exportsRoot = Path.GetFullPath(exportsRoot);
+        _writeRoots = writeRoots.Select(Path.GetFullPath).ToArray();
+        _blockReparsePoints = blockReparsePoints;
     }
 
     public static BoundaryPolicy CreateDefault(string settingsPath, string exportsRoot)
     {
-        // settings.yaml is currently empty in repo; default to exportsRoot until populated.
         _ = settingsPath; // reserved for future parsing
-        return new BoundaryPolicy(exportsRoot);
+        return new BoundaryPolicy(new[] { exportsRoot }, blockReparsePoints: true);
+    }
+
+    public static BoundaryPolicy FromSettings(SettingsV1 settings, string fallbackExportsRoot)
+    {
+        var roots = (settings.Boundary.AllowWriteUnderWsl ?? new List<string>())
+            .Where(x => !string.IsNullOrWhiteSpace(x))
+            .Select(x => x.Trim())
+            .ToList();
+
+        if (roots.Count == 0)
+            roots.Add(fallbackExportsRoot);
+
+        return new BoundaryPolicy(roots, settings.Boundary.BlockReparsePoints);
     }
 
     public bool AllowWriteUnder(string candidateDir, out ErrorResponse? deny)
@@ -585,14 +625,18 @@ internal sealed class BoundaryPolicy
 
         var full = Path.GetFullPath(candidateDir);
 
-        if (!IsDescendant(full, _exportsRoot))
+        if (!_writeRoots.Any(r => IsDescendant(full, r)))
         {
-            deny = new ErrorResponse("BOUNDARY_DENY", "Write denied outside exports root", Detail: full, Hint: $"Allowed root: {_exportsRoot}");
+            deny = new ErrorResponse(
+                "BOUNDARY_DENY",
+                "Write denied outside allowlisted roots",
+                Detail: full,
+                Hint: $"Allowed roots: {string.Join(", ", _writeRoots)}");
             return false;
         }
 
         // Best-effort reparse/symlink block on the *existing* path segments
-        if (HasReparsePointInPath(full))
+        if (_blockReparsePoints && HasReparsePointInPath(full))
         {
             deny = new ErrorResponse("BOUNDARY_DENY", "Write denied due to reparse point/symlink in path", Detail: full);
             return false;
@@ -717,14 +761,6 @@ internal static class Pins
     public static Dictionary<(string role, string tier), ModelInfo>? TryLoadPinned(string pinnedPath)
     {
         if (!File.Exists(pinnedPath)) return null;
-
-        // Minimal, deterministic parse for the pinned.yaml structure defined in spec.
-        // Supports:
-        // models:
-        //   general:
-        //     fast:
-        //       tag: "..."
-        //       digest: "..."
 
         string? currentRole = null;
         string? currentTier = null;

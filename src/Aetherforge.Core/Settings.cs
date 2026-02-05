@@ -1,5 +1,5 @@
-// Suggested new file: src/Aetherforge.Core/Settings.cs
-// Dependency: YamlDotNet (recommended) OR keep manual parsing (but settings is larger than pinned.yaml).
+// D:/Aetherforge/src/Aetherforge.Core/Settings.cs
+// Dependencies: YamlDotNet
 
 using System;
 using System.Collections.Generic;
