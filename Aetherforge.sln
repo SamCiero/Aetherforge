@@ -27,6 +27,7 @@ Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "docs", "docs", "{9BD68711-2
 		docs\directory.md = docs\directory.md
 		docs\roadmap.md = docs\roadmap.md
 		docs\spec.md = docs\spec.md
+		docs\_script_template.ps1 = docs\_script_template.ps1
 	EndProjectSection
 EndProject
 Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "config", "config", "{FE0FAE8C-1C6C-43E1-8855-B97326417993}"

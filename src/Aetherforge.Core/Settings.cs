@@ -1,5 +1,4 @@
 // D:/Aetherforge/src/Aetherforge.Core/Settings.cs
-// Dependencies: YamlDotNet
 
 using System;
 using System.Collections.Generic;

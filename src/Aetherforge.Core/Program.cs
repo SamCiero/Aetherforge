@@ -1,3 +1,5 @@
+// D:/Aetherforge/src/Aetherforge.Core/Program.cs
+
 using Microsoft.Data.Sqlite;
 using System.Diagnostics;
 using System.Net.Http.Headers;

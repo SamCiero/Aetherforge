@@ -1,3 +1,5 @@
+// D:/Aetherforge/src/Aetherforge.Core/SettingsLoader.cs
+
 using System.Text;
 using YamlDotNet.Serialization;
 using YamlDotNet.Serialization.NamingConventions;
