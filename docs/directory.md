@@ -9,6 +9,7 @@ D:\Aetherforge\
 ├─ Aetherforge.sln
 ├─ Directory.Build.props
 ├─ global.json
+├─ NuGet.config
 ├─ .github\
 │  └─ workflows\
 ├─ config\
@@ -55,6 +56,8 @@ D:\Aetherforge\
 │  │  ├─ Aetherforge.Core.csproj
 │  │  ├─ Aetherforge.Core.csproj.user
 │  │  ├─ Program.cs
+│  │  ├─ Settings.cs
+│  │  ├─ SettingsLoader.cs
 │  │  ├─ appsettings.json
 │  │  ├─ appsettings.Development.json
 │  │  └─ Properties\launchSettings.json
