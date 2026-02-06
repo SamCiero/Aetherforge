@@ -90,23 +90,47 @@ public sealed record ErrorResponse(
 // /v1/status
 // ---------------------------
 
+/// <summary>
+/// Status response returned from <c>GET /v1/status</c>.
+///
+/// The shape of this object follows the stable JSON keys defined in Spec.md §7.4.1. Additional
+/// properties must not be added without evolving the spec. The top-level <c>schema_version</c>
+/// allows clients to switch on response revisions. <c>captured_utc</c> is an ISO‑8601 timestamp
+/// of when the status was generated.
+/// </summary>
 public sealed record StatusResponse(
-    [property: JsonPropertyName("utc")] string Utc,
+    [property: JsonPropertyName("schema_version")] int SchemaVersion,
+    [property: JsonPropertyName("captured_utc")] string CapturedUtc,
     StatusCoreInfo Core,
-    StatusDbInfo Db,
     StatusOllamaInfo Ollama,
-    StatusPinsInfo Pins);
+    StatusPinsInfo Pins,
+    StatusDbInfo Db,
+    StatusGpuInfo Gpu,
+    StatusTailnetInfo Tailnet,
+    StatusFilesInfo Files);
 
+/// <summary>
+/// Core subsection of the status payload. Indicates whether the Core API is reachable,
+/// surfaces the version string, and reports the canonical base URL.
+/// </summary>
 public sealed record StatusCoreInfo(
     bool Reachable,
     string Version,
     [property: JsonPropertyName("base_url")] string BaseUrl);
 
+/// <summary>
+/// Database subsection of the status payload. Provides the path to the SQLite file,
+/// a healthy flag, and any error message if unhealthy.
+/// </summary>
 public sealed record StatusDbInfo(
     string Path,
-    [property: JsonPropertyName("wal_mode")] bool WalMode,
-    [property: JsonPropertyName("busy_timeout_ms")] int BusyTimeoutMs);
+    bool Healthy,
+    string? Error);
 
+/// <summary>
+/// Ollama subsection of the status payload. Indicates Ollama reachability, version,
+/// canonical base URL, and optional models directory path.
+/// </summary>
 public sealed record StatusOllamaInfo(
     bool Reachable,
     string Version,
@@ -114,10 +138,42 @@ public sealed record StatusOllamaInfo(
     // Optional/forward-compatible: some deployments can surface this; others cannot.
     [property: JsonPropertyName("models_dir")] string? ModelsDir = null);
 
+/// <summary>
+/// Pins subsection of the status payload. Includes the path to <c>pinned.yaml</c>,
+/// whether the pinned matrix is complete (<c>PinsMatch</c>), whether the pinned
+/// model digests match the live digests reported by Ollama (<c>ModelDigestsMatch</c>),
+/// and a free‑form detail string for diagnostics.
+/// </summary>
 public sealed record StatusPinsInfo(
+    [property: JsonPropertyName("pinned_yaml_path")] string PinnedYamlPath,
     [property: JsonPropertyName("pins_match")] bool? PinsMatch,
     [property: JsonPropertyName("model_digests_match")] bool? ModelDigestsMatch,
     string? Detail);
+
+/// <summary>
+/// GPU subsection of the status payload. Surfaces whether a GPU is visible to the
+/// runtime and a deterministic evidence string (e.g. output of <c>nvidia‑smi</c>).
+/// </summary>
+public sealed record StatusGpuInfo(
+    bool Visible,
+    string? Evidence);
+
+/// <summary>
+/// Tailnet subsection of the status payload. Indicates whether tailnet serving is
+/// enabled and the published port if applicable. This is post‑MVP functionality and
+/// currently always reports disabled.
+/// </summary>
+public sealed record StatusTailnetInfo(
+    [property: JsonPropertyName("serve_enabled")] bool ServeEnabled,
+    [property: JsonPropertyName("published_port")] int? PublishedPort);
+
+/// <summary>
+/// Files subsection of the status payload. Reports the existence of settings.yaml and
+/// pinned.yaml on disk.
+/// </summary>
+public sealed record StatusFilesInfo(
+    [property: JsonPropertyName("settings_exists")] bool SettingsExists,
+    [property: JsonPropertyName("pinned_exists")] bool PinnedExists);
 
 // ---------------------------
 // Ollama tags (used by /v1/status)
