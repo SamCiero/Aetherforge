@@ -56,7 +56,6 @@ Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "logs", "logs", "{7BEE7B09-5
 EndProject
 Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "bootstrap", "bootstrap", "{E72332D5-6896-44BB-98F4-FC41436BC523}"
 	ProjectSection(SolutionItems) = preProject
-		logs\bootstrap\gpu_inference_evidence.txt = logs\bootstrap\gpu_inference_evidence.txt
 		logs\bootstrap\status.json = logs\bootstrap\status.json
 	EndProjectSection
 EndProject

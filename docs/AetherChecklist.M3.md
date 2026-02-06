@@ -1,4 +1,4 @@
-# M3 — Windows Launcher + Autostart + Backups Checklist
+# M3 â€” Windows Launcher + Autostart + Backups Checklist
 
 ## Objective
 Make Aetherforge operable like a product on Windows: lifecycle control, deterministic status/errors, and reliable backups.

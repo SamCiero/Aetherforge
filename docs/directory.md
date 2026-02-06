@@ -34,7 +34,8 @@ D:\Aetherforge\
 ├─ exports\
 ├─ logs\
 │  └─ bootstrap\
-│     ├─ gpu_inference_evidence.txt
+│     ├─ gpu_evidence.txt
+│     ├─ wsl_networking.txt
 │     └─ status.json
 ├─ scripts\
 │  ├─ aether.ps1
