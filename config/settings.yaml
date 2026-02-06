@@ -18,6 +18,16 @@ defaults:
   tier: "fast"      # fast|thinking
 
 # -----------------------------
+# Pins policy (Phase 1)
+# -----------------------------
+pins:
+  # strict   = require exact role/tier pin (current behavior)
+  # fallback = if missing, use fallback_role/fallback_tier (storage-constrained mode)
+  mode: "fallback"          # strict|fallback
+  fallback_role: "general"  # general|coding|agent (recommend: general)
+  fallback_tier: "fast"     # fast|thinking
+
+# -----------------------------
 # Profiles (system prompts)
 # -----------------------------
 profiles:

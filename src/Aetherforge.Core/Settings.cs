@@ -12,6 +12,7 @@ public sealed record SettingsV1
 
     public PortsSettings Ports { get; init; } = new();
     public DefaultsSettings Defaults { get; init; } = new();
+    public PinsSettings Pins { get; init; } = new();
     public ProfilesSettings Profiles { get; init; } = new();
     public GenerationSettings Generation { get; init; } = new();
     public AutostartSettings Autostart { get; init; } = new();
@@ -29,6 +30,15 @@ public sealed record DefaultsSettings
 {
     public string Role { get; init; } = "general";
     public string Tier { get; init; } = "fast";
+}
+
+public sealed record PinsSettings
+{
+    // strict   = require exact role/tier pin
+    // fallback = if missing, resolve to fallback role/tier
+    public string Mode { get; init; } = "strict"; // strict|fallback
+    public string FallbackRole { get; init; } = "general";
+    public string FallbackTier { get; init; } = "fast";
 }
 
 public sealed record ProfilesSettings
