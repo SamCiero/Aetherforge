@@ -1,28 +1,31 @@
 // D:/Aetherforge/src/Aetherforge.Core/Program.cs
 
+using Aetherforge.Contracts;
 using Microsoft.Data.Sqlite;
-using System.Diagnostics;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using System.Reflection;
 using System.Text;
 using System.Text.Json;
-using Aetherforge.Contracts; // Import canonical API contracts
 using System.Text.Json.Serialization;
+using YamlDotNet.Serialization;
+using YamlDotNet.Serialization.NamingConventions;
 
 namespace Aetherforge.Core;
 
 public sealed class Program
 {
-    // Canonical loopback (spec)
-    private const string CoreBindUrl = "http://127.0.0.1:8484";
-    private const string OllamaBaseUrl = "http://127.0.0.1:11434";
+    // Canonical loopback defaults (settings.yaml can override).
+    private const string DefaultCoreBindUrl = "http://127.0.0.1:8484";
+    private const string DefaultOllamaBaseUrl = "http://127.0.0.1:11434";
 
-    // Default WSL-view paths (override via env if needed)
+    // Default WSL-view paths (override via env if needed).
     private static readonly string SettingsPath = Env("AETHERFORGE_SETTINGS_PATH", "/mnt/d/Aetherforge/config/settings.yaml");
     private static readonly string PinnedPath = Env("AETHERFORGE_PINNED_PATH", "/mnt/d/Aetherforge/config/pinned.yaml");
     private static readonly string DbPath = Env("AETHERFORGE_DB_PATH", "/var/lib/aetherforge/conversations.sqlite");
-    private static readonly string ExportsRoot = Env("AETHERFORGE_EXPORTS_ROOT", "/mnt/d/Aetherforge/exports");
+    private static readonly string ExportsRootEnv = Env("AETHERFORGE_EXPORTS_ROOT", "/mnt/d/Aetherforge/exports");
 
+    // Keep responses deterministic; attributes in Aetherforge.Contracts take precedence.
     private static readonly JsonSerializerOptions JsonOpts = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
@@ -36,124 +39,145 @@ public sealed class Program
     public static async Task Main(string[] args)
     {
         // ---------------------- settings.yaml (load once) ----------------------
-        // Requires SettingsLoader.cs (YamlDotNet + UnderscoredNamingConvention) to exist in Aetherforge.Core.
         var (settings, settingsErr) = SettingsLoader.TryLoad(SettingsPath);
 
         // Precedence:
-        // - ports: settings.yaml > constants
+        // - ports: settings.yaml > defaults
         // - exports root: env var (AETHERFORGE_EXPORTS_ROOT) > settings.yaml > default
-        var coreBindUrl = settings?.Ports?.CoreBindUrl ?? CoreBindUrl;
-        var ollamaBaseUrl = settings?.Ports?.OllamaBaseUrl ?? OllamaBaseUrl;
+        var coreBindUrl = settings?.Ports?.CoreBindUrl ?? DefaultCoreBindUrl;
+        var ollamaBaseUrl = settings?.Ports?.OllamaBaseUrl ?? DefaultOllamaBaseUrl;
 
         var exportsRoot = string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("AETHERFORGE_EXPORTS_ROOT"))
-            ? (settings?.Boundary?.Roots?.Wsl?.Exports ?? ExportsRoot)
-            : ExportsRoot;
+            ? (settings?.Boundary?.Roots?.Wsl?.Exports ?? ExportsRootEnv)
+            : ExportsRootEnv;
+
+        var pinsPolicy = settings?.Pins ?? new PinsSettings();
+
+        // ---------------------- pinned.yaml (load once) ----------------------
+        var (pinned, pinnedErr) = PinnedLoader.TryLoad(PinnedPath);
 
         var builder = WebApplication.CreateBuilder(args);
         builder.WebHost.UseUrls(coreBindUrl);
 
+        // Ensure request binding uses the same serializer semantics as responses.
+        builder.Services.ConfigureHttpJsonOptions(o =>
+        {
+            o.SerializerOptions.PropertyNamingPolicy = JsonOpts.PropertyNamingPolicy;
+            o.SerializerOptions.DefaultIgnoreCondition = JsonOpts.DefaultIgnoreCondition;
+            o.SerializerOptions.WriteIndented = JsonOpts.WriteIndented;
+        });
+
         var app = builder.Build();
 
-        // Init & config load
+        // Init & config load.
         await Db.EnsureInitializedAsync(DbPath);
 
-        var pins = Pins.TryLoadPinned(PinnedPath);
-
-        var policy = settings is not null
+        var boundary = settings is not null
             ? BoundaryPolicy.FromSettings(settings, exportsRoot)
             : BoundaryPolicy.CreateDefault(SettingsPath, exportsRoot);
 
         // --------------------------- /v1/status ---------------------------
         app.MapGet("/v1/status", async () =>
         {
-            var capturedUtc = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
+            var utc = UtcNowIso8601();
 
-            // Ollama best-effort
+            // DB settings probe (best-effort).
+            bool walMode = false;
+            int busyTimeoutMs = 0;
+            try
+            {
+                await using var conn = Db.Open(DbPath);
+                await conn.OpenAsync();
+
+                var journal = (await Db.ScalarAsync(conn, "PRAGMA journal_mode;"))?.Trim();
+                walMode = string.Equals(journal, "wal", StringComparison.OrdinalIgnoreCase);
+
+                var busy = (await Db.ScalarAsync(conn, "PRAGMA busy_timeout;"))?.Trim();
+                if (!int.TryParse(busy, out busyTimeoutMs)) busyTimeoutMs = 0;
+            }
+            catch
+            {
+                walMode = false;
+                busyTimeoutMs = 0;
+            }
+
+            // Ollama best-effort.
             bool ollamaReachable = false;
-            string? ollamaVersion = null;
+            string ollamaVersion = "unknown";
             OllamaTags? tags = null;
 
             try
             {
                 var ver = await StatusHttp.GetFromJsonAsync<OllamaVersion>($"{ollamaBaseUrl}/api/version");
-                ollamaReachable = ver is not null && !string.IsNullOrWhiteSpace(ver.Version);
-                ollamaVersion = ver?.Version;
-                if (ollamaReachable)
+                if (ver is not null && !string.IsNullOrWhiteSpace(ver.Version))
+                {
+                    ollamaReachable = true;
+                    ollamaVersion = ver.Version.Trim();
                     tags = await StatusHttp.GetFromJsonAsync<OllamaTags>($"{ollamaBaseUrl}/api/tags");
+                }
             }
             catch { /* best-effort */ }
 
-            // Pins verification (deterministic semantics)
+            // Pins verification (deterministic semantics).
             bool? pinsMatch = null;
             bool? modelDigestsMatch = null;
             string? pinsDetail = null;
 
-            if (pins is null)
+            if (pinned is null)
             {
                 pinsMatch = null;
                 modelDigestsMatch = null;
-                pinsDetail = "pinned.yaml missing or unreadable";
-            }
-            else if (tags?.Models is null)
-            {
-                pinsMatch = null;
-                modelDigestsMatch = null;
-                pinsDetail = "ollama tags unavailable";
+                pinsDetail = pinnedErr ?? "pinned.yaml missing or unreadable";
             }
             else
             {
-                pinsMatch = true;
-                modelDigestsMatch = Pins.VerifyAgainstTags(pins, tags);
-            }
+                var pinsValidation = PinnedValidator.Validate(pinned);
+                pinsMatch = pinsValidation.IsValid;
 
-            // DB health
-            var dbHealthy = false;
-            string? dbError = null;
-            try
-            {
-                await using var conn = Db.Open(DbPath);
-                await conn.OpenAsync();
-                var v = await Db.ScalarAsync(conn, "SELECT value FROM meta WHERE key='schema_version' LIMIT 1;");
-                dbHealthy = v?.Trim() == "1";
-            }
-            catch (Exception ex)
-            {
-                dbHealthy = false;
-                dbError = $"{ex.GetType().Name}: {ex.Message}";
-            }
+                // Note: planned models may have digest=null when pins.mode=fallback. This is not fatal.
+                pinsDetail = pinsValidation.Detail;
 
-            // GPU evidence (best-effort)
-            bool gpuVisible = false;
-            string? gpuEvidence = null;
-            try
-            {
-                var (ok, outp) = Proc.TryRun("bash", "-lc \"nvidia-smi --query-gpu=name,driver_version --format=csv,noheader\"");
-                gpuVisible = ok && !string.IsNullOrWhiteSpace(outp);
-                gpuEvidence = gpuVisible ? outp.Trim() : null;
-            }
-            catch { /* best-effort */ }
+                if (tags?.Models is null)
+                {
+                    modelDigestsMatch = null;
+                    pinsDetail = AppendDetail(pinsDetail, "ollama tags unavailable");
+                }
+                else
+                {
+                    modelDigestsMatch = PinnedVerifier.VerifyDigests(pinned, tags, out var verifyDetail);
+                    pinsDetail = AppendDetail(pinsDetail, verifyDetail);
+                }
 
-            // Settings validity (surface loader/validator result)
-            bool? settingsValid =
-                settingsErr is null
-                    ? (settings is not null ? true : (bool?)null)
-                    : false;
+                if (ollamaReachable && !string.IsNullOrWhiteSpace(pinned.Ollama.Version) &&
+                    !string.Equals(pinned.Ollama.Version.Trim(), ollamaVersion, StringComparison.Ordinal))
+                {
+                    pinsDetail = AppendDetail(pinsDetail, $"ollama version mismatch (pinned={pinned.Ollama.Version}, live={ollamaVersion})");
+                }
+
+                // Surface settings validity without expanding the contract.
+                if (settingsErr is not null)
+                    pinsDetail = AppendDetail(pinsDetail, $"settings invalid: {settingsErr}");
+            }
 
             var status = new StatusResponse(
-                1,
-                capturedUtc,
-                new StatusCoreInfo(true, coreBindUrl),
-                new StatusOllamaInfo(ollamaReachable, ollamaVersion),
-                new StatusPinsInfo(PinnedPath, pinsMatch, modelDigestsMatch, pinsDetail),
-                new StatusDbInfo(DbPath, dbHealthy, dbError),
-                new StatusGpuInfo(gpuVisible, gpuEvidence),
-                new StatusTailnetInfo(false, null),
-                new StatusFilesInfo(
-                    File.Exists(SettingsPath),
-                    File.Exists(PinnedPath),
-                    settingsValid,
-                    settingsErr
-                )
+                Utc: utc,
+                Core: new StatusCoreInfo(
+                    Reachable: true,
+                    Version: CoreVersion(),
+                    BaseUrl: coreBindUrl),
+                Db: new StatusDbInfo(
+                    Path: DbPath,
+                    WalMode: walMode,
+                    BusyTimeoutMs: busyTimeoutMs),
+                Ollama: new StatusOllamaInfo(
+                    Reachable: ollamaReachable,
+                    Version: ollamaVersion,
+                    BaseUrl: ollamaBaseUrl,
+                    ModelsDir: null),
+                Pins: new StatusPinsInfo(
+                    PinsMatch: pinsMatch,
+                    ModelDigestsMatch: modelDigestsMatch,
+                    Detail: pinsDetail)
             );
 
             return Results.Json(status, options: JsonOpts);
@@ -165,16 +189,11 @@ public sealed class Program
             if (!Validation.TryRoleTier(req.Role, req.Tier, out var role, out var tier, out var err))
                 return ApiError.BadRequest(err!);
 
-            if (pins is null)
-                return ApiError.Failed("PIN_MISSING", "Pinned model map is missing", hint: "Ensure config/pinned.yaml exists.");
+            if (pinned is null)
+                return ApiError.Failed("PIN_MISSING", "Pinned model map is missing", hint: pinnedErr ?? "Ensure config/pinned.yaml exists.");
 
-            if (!pins.TryGetValue((role, tier), out var model))
-                return ApiError.BadRequest(new ErrorResponse(
-                    "PIN_NO_MATCH",
-                    $"No pinned model for role={role} tier={tier}",
-                    null,
-                    "Update pinned.yaml model mapping."
-                ));
+            if (!PinsResolver.TryResolveModel(pinned, pinsPolicy, role, tier, out var resolved, out var resolution, out var resolveErr))
+                return ApiError.BadRequest(resolveErr!);
 
             var title = (req.Title ?? "").Trim();
             if (title.Length == 0) title = $"{role}-{tier}";
@@ -182,10 +201,14 @@ public sealed class Program
             await using var conn = Db.Open(DbPath);
             await conn.OpenAsync();
 
-            var createdUtc = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
-            var id = await Db.InsertConversationAsync(conn, createdUtc, role, tier, title, model.Tag, model.Digest);
+            var createdUtc = UtcNowIso8601();
+            var id = await Db.InsertConversationAsync(conn, createdUtc, role, tier, title, resolved.Tag, resolved.Digest);
 
-            var dto = new ConversationDto(id, createdUtc, title, role, tier, model.Tag, model.Digest);
+            var dto = new ConversationDto(id, createdUtc, title, role, tier, resolved.Tag, resolved.Digest);
+
+            // Persist resolution info (best-effort) in a synthetic meta message? Not yet.
+            _ = resolution;
+
             return Results.Json(dto, options: JsonOpts);
         });
 
@@ -246,13 +269,13 @@ public sealed class Program
             var convo = await Db.GetConversationAsync(conn, req.ConversationId);
             if (convo is null) return ApiError.NotFound("NOT_FOUND", $"Conversation {req.ConversationId} not found");
 
-            // Boundary: SSE response headers
+            // Boundary: SSE response headers.
             http.Response.Headers.CacheControl = "no-cache";
             http.Response.Headers.Connection = "keep-alive";
             http.Response.ContentType = "text/event-stream; charset=utf-8";
 
-            // Persist user message
-            var nowUtc = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
+            // Persist user message.
+            var nowUtc = UtcNowIso8601();
             _ = await Db.InsertMessageAsync(conn, req.ConversationId, nowUtc, "user", req.Content, metaJson: null);
 
             // Build Ollama chat request from DB history (simple replay). Important: fetch history
@@ -260,28 +283,30 @@ public sealed class Program
             // echoed back into the prompt.
             var history = await Db.GetMessagesAsync(conn, req.ConversationId);
 
-            // Create assistant placeholder message to get message_id for SSE events
-            var assistantCreatedUtc = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
+            // Create assistant placeholder message to get message_id for SSE events.
+            var assistantCreatedUtc = UtcNowIso8601();
             var assistantId = await Db.InsertMessageAsync(conn, req.ConversationId, assistantCreatedUtc, "assistant", content: "", metaJson: null);
 
-            // Emit meta
+            // Emit meta.
+            var resolution = PinsResolver.TryExplainResolution(pinned, pinsPolicy, convo);
             await Sse.WriteEventAsync(
                 http.Response,
                 "meta",
-                new SseMetaEvent(req.ConversationId, assistantId, convo.ModelTag, convo.ModelDigest),
+                new SseMetaEvent(req.ConversationId, assistantId, convo.ModelTag, convo.ModelDigest, resolution),
                 JsonOpts,
                 http.RequestAborted);
 
             var ollamaReq = new OllamaChatRequest(
                 convo.ModelTag,
                 history.Select(m => new OllamaMessage(m.Sender == "assistant" ? "assistant" : "user", m.Content)).ToList(),
-                true);
+                Stream: true);
 
             var assistantBuf = new StringBuilder();
 
             try
             {
                 using var httpClient = new HttpClient { Timeout = Timeout.InfiniteTimeSpan };
+
                 using var msg = new HttpRequestMessage(HttpMethod.Post, $"{ollamaBaseUrl}/api/chat");
                 msg.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/x-ndjson"));
                 msg.Content = new StringContent(JsonSerializer.Serialize(ollamaReq, JsonOpts), Encoding.UTF8, "application/json");
@@ -324,7 +349,7 @@ public sealed class Program
                         http.RequestAborted);
                 }
 
-                // Persist assistant final content
+                // Persist assistant final content.
                 await Db.UpdateMessageContentAsync(conn, assistantId, assistantBuf.ToString());
 
                 await Sse.WriteEventAsync(
@@ -333,11 +358,12 @@ public sealed class Program
                     new SseDoneEvent(assistantId),
                     JsonOpts,
                     http.RequestAborted);
+
                 return Results.Empty;
             }
             catch (OperationCanceledException)
             {
-                // Cancellation: persist whatever we have and end silently
+                // Cancellation: persist whatever we have and end silently.
                 await Db.UpdateMessageContentAsync(conn, assistantId, assistantBuf.ToString());
                 return Results.Empty;
             }
@@ -369,12 +395,12 @@ public sealed class Program
 
             var msgs = await Db.GetMessagesAsync(conn, id);
 
-            // Resolve export dir: ExportsRoot/YYYY-MM-DD (UTC)
+            // Resolve export dir: <exportsRoot>/YYYY-MM-DD (UTC).
             var dateDir = DateTime.UtcNow.ToString("yyyy-MM-dd");
             var outDir = Path.Combine(exportsRoot, dateDir);
 
-            // Boundary enforcement (allowlisted roots)
-            if (!policy.AllowWriteUnder(outDir, out var deny))
+            // Boundary enforcement (allowlisted roots).
+            if (!boundary.AllowWriteUnder(outDir, out var deny))
                 return ApiError.Forbidden(deny!);
 
             Directory.CreateDirectory(outDir);
@@ -383,19 +409,19 @@ public sealed class Program
             var mdPath = Path.Combine(outDir, $"{convo.Id}.{slug}.md");
             var jsonPath = Path.Combine(outDir, $"{convo.Id}.{slug}.json");
 
-            // JSON export (schema v1)
+            // JSON export (schema v1).
             var export = new ConversationExportV1(
-                1,
-                DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"),
-                "unknown",
-                new ExportConversation(convo.Id, convo.CreatedUtc, convo.Title, convo.Role, convo.Tier),
-                new ExportModel(convo.ModelTag, convo.ModelDigest),
-                msgs.Select(m => new ExportMessage(m.Id, m.CreatedUtc, m.Sender, m.Content, m.MetaJson)).ToList());
+                SchemaVersion: 1,
+                GeneratedUtc: UtcNowIso8601(),
+                CoreVersion: CoreVersion(),
+                Conversation: new ExportConversation(convo.Id, convo.CreatedUtc, convo.Title, convo.Role, convo.Tier),
+                Model: new ExportModel(convo.ModelTag, convo.ModelDigest),
+                Messages: msgs.Select(m => new ExportMessage(m.Id, m.CreatedUtc, m.Sender, m.Content, m.MetaJson)).ToList());
 
             var jsonText = JsonSerializer.Serialize(export, JsonOpts);
             await File.WriteAllTextAsync(jsonPath, jsonText, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
 
-            // Markdown export
+            // Markdown export.
             var md = new StringBuilder();
             md.AppendLine($"# Conversation {convo.Id}: {convo.Title}");
             md.AppendLine();
@@ -430,6 +456,25 @@ public sealed class Program
         return string.IsNullOrWhiteSpace(v) ? fallback : v;
     }
 
+    private static string UtcNowIso8601() => DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
+
+    private static string CoreVersion()
+    {
+        var v = Assembly.GetExecutingAssembly().GetName().Version;
+        return v is null ? "unknown" : v.ToString();
+    }
+
+    private static string? AppendDetail(string? existing, string? add)
+    {
+        add = (add ?? "").Trim();
+        if (add.Length == 0) return existing;
+
+        existing = (existing ?? "").Trim();
+        if (existing.Length == 0) return add;
+
+        return $"{existing}; {add}";
+    }
+
     private static async Task<string?> SafeReadAsync(HttpResponseMessage resp)
     {
         try { return await resp.Content.ReadAsStringAsync(); }
@@ -437,86 +482,7 @@ public sealed class Program
     }
 }
 
-// --------------------------- DTOs ---------------------------
-// The API request/response DTOs are defined in the Aetherforge.Contracts project.
-// We intentionally omit them here to avoid duplication. See Contracts.cs for:
-//   ConversationCreateRequest
-//   ConversationPatchRequest
-//   ChatRequest
-//   ConversationDto
-//   MessageDto
-//   ConversationWithMessagesDto
-//   ConversationListResponse
-
-// --------------------------- Responses internal to Core ---------------------------
-
-internal sealed record StatusResponse(
-    [property: JsonPropertyName("schema_version")] int SchemaVersion,
-    [property: JsonPropertyName("captured_utc")] string CapturedUtc,
-    [property: JsonPropertyName("core")] StatusCoreInfo Core,
-    [property: JsonPropertyName("ollama")] StatusOllamaInfo Ollama,
-    [property: JsonPropertyName("pins")] StatusPinsInfo Pins,
-    [property: JsonPropertyName("db")] StatusDbInfo Db,
-    [property: JsonPropertyName("gpu")] StatusGpuInfo Gpu,
-    [property: JsonPropertyName("tailnet")] StatusTailnetInfo Tailnet,
-    [property: JsonPropertyName("files")] StatusFilesInfo Files
-);
-
-internal sealed record StatusCoreInfo(
-    [property: JsonPropertyName("reachable")] bool Reachable,
-    [property: JsonPropertyName("base_url")] string BaseUrl
-);
-
-internal sealed record StatusOllamaInfo(
-    [property: JsonPropertyName("reachable")] bool Reachable,
-    [property: JsonPropertyName("version")] string? Version
-);
-
-internal sealed record StatusPinsInfo(
-    [property: JsonPropertyName("pinned_yaml_path")] string PinnedYamlPath,
-    [property: JsonPropertyName("pins_match")] bool? PinsMatch,
-    [property: JsonPropertyName("model_digests_match")] bool? ModelDigestsMatch,
-    [property: JsonPropertyName("detail")] string? Detail
-);
-
-internal sealed record StatusDbInfo(
-    [property: JsonPropertyName("path")] string Path,
-    [property: JsonPropertyName("healthy")] bool Healthy,
-    [property: JsonPropertyName("error")] string? Error
-);
-
-internal sealed record StatusGpuInfo(
-    [property: JsonPropertyName("visible")] bool Visible,
-    [property: JsonPropertyName("evidence")] string? Evidence
-);
-
-internal sealed record StatusTailnetInfo(
-    [property: JsonPropertyName("serve_enabled")] bool ServeEnabled,
-    [property: JsonPropertyName("published_port")] int? PublishedPort
-);
-
-internal sealed record StatusFilesInfo(
-    [property: JsonPropertyName("settings_exists")] bool SettingsExists,
-    [property: JsonPropertyName("pinned_exists")] bool PinnedExists,
-    [property: JsonPropertyName("settings_valid")] bool? SettingsValid,
-    [property: JsonPropertyName("settings_error")] string? SettingsError
-);
-
-internal sealed record SseMetaEvent(
-    [property: JsonPropertyName("conversation_id")] int ConversationId,
-    [property: JsonPropertyName("message_id")] int MessageId,
-    [property: JsonPropertyName("model_tag")] string ModelTag,
-    [property: JsonPropertyName("model_digest")] string ModelDigest
-);
-
-internal sealed record SseDeltaEvent(
-    [property: JsonPropertyName("message_id")] int MessageId,
-    [property: JsonPropertyName("delta_text")] string DeltaText
-);
-
-internal sealed record SseDoneEvent(
-    [property: JsonPropertyName("message_id")] int MessageId
-);
+// --------------------------- Internal-to-Core responses ---------------------------
 
 internal sealed record ExportResponse(
     [property: JsonPropertyName("ok")] bool Ok,
@@ -569,7 +535,7 @@ internal static class ApiError
 
 internal static class Validation
 {
-    public static bool TryRoleTier(string roleRaw, string tierRaw, out string role, out string tier, out ErrorResponse? err)
+    public static bool TryRoleTier(string? roleRaw, string? tierRaw, out string role, out string tier, out ErrorResponse? err)
     {
         role = (roleRaw ?? "").Trim().ToLowerInvariant();
         tier = (tierRaw ?? "").Trim().ToLowerInvariant();
@@ -637,7 +603,7 @@ internal sealed class BoundaryPolicy
             return false;
         }
 
-        // Best-effort reparse/symlink block on the *existing* path segments
+        // Best-effort reparse/symlink block on the *existing* path segments.
         if (_blockReparsePoints && HasReparsePointInPath(full))
         {
             deny = new ErrorResponse("BOUNDARY_DENY", "Write denied due to reparse point/symlink in path", Detail: full);
@@ -661,8 +627,10 @@ internal sealed class BoundaryPolicy
                                 .Where(p => !string.IsNullOrWhiteSpace(p))
                                 .ToArray();
 
-            // Rebuild progressively from root
-            string current = fullPath.StartsWith(Path.DirectorySeparatorChar) ? Path.DirectorySeparatorChar.ToString() : parts[0];
+            // Rebuild progressively from root.
+            string current = fullPath.StartsWith(Path.DirectorySeparatorChar)
+                ? Path.DirectorySeparatorChar.ToString()
+                : parts[0];
 
             for (int i = fullPath.StartsWith(Path.DirectorySeparatorChar) ? 0 : 1; i < parts.Length; i++)
             {
@@ -725,139 +693,291 @@ internal static class Sse
     }
 }
 
-internal static class Proc
+
+// --------------------------- pinned.yaml (YAML deserialize) ---------------------------
+
+internal sealed record PinnedV1
 {
-    public static (bool ok, string output) TryRun(string file, string args)
-    {
-        var psi = new ProcessStartInfo
-        {
-            FileName = file,
-            Arguments = args,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-            CreateNoWindow = true
-        };
+    public int SchemaVersion { get; init; }
+    public string? CapturedUtc { get; init; }
+    public PinnedOllama Ollama { get; init; } = new();
 
-        using var p = Process.Start(psi);
-        if (p is null) return (false, "");
-
-        // Avoid potential hangs when reading redirected output from a long-running process.
-        if (!p.WaitForExit(1500))
-        {
-            try { p.Kill(entireProcessTree: true); } catch { /* best-effort */ }
-        }
-
-        // With the process exited (or killed), these reads won't block indefinitely.
-        var outp = (p.StandardOutput.ReadToEnd() ?? "");
-        return (p.ExitCode == 0, outp);
-    }
+    // role -> tier -> entry
+    public Dictionary<string, Dictionary<string, PinnedModel>> Models { get; init; } = new();
 }
 
-// --------------------------- Pins (minimal YAML parse) ---------------------------
-
-internal sealed record ModelInfo(string Tag, string Digest);
-
-internal static class Pins
+internal sealed record PinnedOllama
 {
-    public static Dictionary<(string role, string tier), ModelInfo>? TryLoadPinned(string pinnedPath)
+    public string? Version { get; init; }
+}
+
+internal sealed record PinnedModel
+{
+    public string? Tag { get; init; }
+    public string? Digest { get; init; }
+    public bool Required { get; init; }
+}
+
+internal static class PinnedLoader
+{
+    public static (PinnedV1? Pinned, string? Error) TryLoad(string pinnedPath)
     {
-        if (!File.Exists(pinnedPath)) return null;
+        if (!File.Exists(pinnedPath))
+            return (null, $"pinned.yaml missing: {pinnedPath}");
 
-        string? currentRole = null;
-        string? currentTier = null;
+        var yaml = File.ReadAllText(pinnedPath, Encoding.UTF8);
+        if (string.IsNullOrWhiteSpace(yaml))
+            return (null, $"pinned.yaml is empty: {pinnedPath}");
 
-        var map = new Dictionary<(string, string), ModelInfo>();
-
-        foreach (var raw in File.ReadLines(pinnedPath))
+        try
         {
-            var line = raw.TrimEnd();
-            if (string.IsNullOrWhiteSpace(line)) continue;
-            var t = line.TrimStart();
-            if (t.StartsWith('#')) continue;
+            var deserializer = new DeserializerBuilder()
+                .WithNamingConvention(UnderscoredNamingConvention.Instance) // snake_case <-> PascalCase
+                .IgnoreUnmatchedProperties()
+                .Build();
 
-            var indent = line.Length - t.Length;
+            var pinned = deserializer.Deserialize<PinnedV1>(yaml);
+            if (pinned is null)
+                return (null, "pinned.yaml deserialized to null");
 
-            // role key under models (indent 2)
-            if (indent == 2 && t.EndsWith(':') && t != "ollama:" && t != "models:")
+            if (pinned.SchemaVersion != 1)
+                return (null, $"pinned.yaml schema_version must be 1 (got {pinned.SchemaVersion})");
+
+            // Normalize keys and digests for consistent lookups.
+            pinned = pinned with { Models = NormalizeModels(pinned.Models) };
+
+            return (pinned, null);
+        }
+        catch (Exception ex)
+        {
+            return (null, $"{ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    private static Dictionary<string, Dictionary<string, PinnedModel>> NormalizeModels(Dictionary<string, Dictionary<string, PinnedModel>>? models)
+    {
+        var outp = new Dictionary<string, Dictionary<string, PinnedModel>>(StringComparer.OrdinalIgnoreCase);
+        if (models is null) return outp;
+
+        foreach (var (roleRaw, tiersRaw) in models)
+        {
+            var role = (roleRaw ?? "").Trim().ToLowerInvariant();
+            if (role.Length == 0) continue;
+
+            var tiers = new Dictionary<string, PinnedModel>(StringComparer.OrdinalIgnoreCase);
+            if (tiersRaw is not null)
             {
-                currentRole = t[..^1].Trim().ToLowerInvariant();
-                currentTier = null;
-                continue;
-            }
-
-            // tier key under role (indent 4)
-            if (indent == 4 && t.EndsWith(':'))
-            {
-                currentTier = t[..^1].Trim().ToLowerInvariant();
-                continue;
-            }
-
-            // tag/digest under tier (indent >=6)
-            if (indent >= 6 && currentRole is not null && currentTier is not null)
-            {
-                if (t.StartsWith("tag:", StringComparison.Ordinal))
+                foreach (var (tierRaw, entryRaw) in tiersRaw)
                 {
-                    var tag = Scalar(t["tag:".Length..]);
-                    if (!map.TryGetValue((currentRole, currentTier), out var existing))
-                        map[(currentRole, currentTier)] = new ModelInfo(tag, "");
-                    else
-                        map[(currentRole, currentTier)] = existing with { Tag = tag };
-                }
-                else if (t.StartsWith("digest:", StringComparison.Ordinal))
-                {
-                    var dig = NormalizeDigest(Scalar(t["digest:".Length..]));
-                    if (!IsDigest64(dig)) continue;
+                    var tier = (tierRaw ?? "").Trim().ToLowerInvariant();
+                    if (tier.Length == 0) continue;
 
-                    if (!map.TryGetValue((currentRole, currentTier), out var existing))
-                        map[(currentRole, currentTier)] = new ModelInfo("", dig);
-                    else
-                        map[(currentRole, currentTier)] = existing with { Digest = dig };
+                    var tag = (entryRaw?.Tag ?? "").Trim();
+                    var dig = NormalizeDigest(entryRaw?.Digest);
+
+                    tiers[tier] = (entryRaw ?? new PinnedModel()) with
+                    {
+                        Tag = tag.Length == 0 ? null : tag,
+                        Digest = dig
+                    };
                 }
             }
+
+            outp[role] = tiers;
         }
 
-        // Drop incomplete entries
-        var pruned = map.Where(kv => !string.IsNullOrWhiteSpace(kv.Value.Tag) && !string.IsNullOrWhiteSpace(kv.Value.Digest))
-                        .ToDictionary(k => k.Key, v => v.Value);
-
-        return pruned.Count == 0 ? null : pruned;
+        return outp;
     }
 
-    public static bool VerifyAgainstTags(Dictionary<(string role, string tier), ModelInfo> pinned, OllamaTags tags)
+    private static string? NormalizeDigest(string? s)
     {
-        var live = new Dictionary<string, string>(StringComparer.Ordinal);
+        s = (s ?? "").Trim().Trim('"').ToLowerInvariant();
+        if (s.Length == 0) return null;
+        if (string.Equals(s, "null", StringComparison.OrdinalIgnoreCase)) return null;
 
-        foreach (var m in tags.Models)
-        {
-            if (string.IsNullOrWhiteSpace(m.Name) || string.IsNullOrWhiteSpace(m.Digest)) continue;
-            live[m.Name] = NormalizeDigest(m.Digest);
-        }
+        if (s.StartsWith("sha256:", StringComparison.Ordinal))
+            s = s["sha256:".Length..];
 
-        foreach (var kv in pinned.Values)
-        {
-            if (!live.TryGetValue(kv.Tag, out var got)) return false;
-            if (!string.Equals(got, kv.Digest, StringComparison.Ordinal)) return false;
-        }
-
-        return true;
-    }
-
-    private static string Scalar(string s)
-    {
-        s = s.Trim();
-        if (s.Length >= 2 && s[0] == '"' && s[^1] == '"') s = s[1..^1];
-        return s.Trim();
-    }
-
-    private static string NormalizeDigest(string s)
-    {
-        s = s.Trim().Trim('"').ToLowerInvariant();
-        return s.StartsWith("sha256:", StringComparison.Ordinal) ? s["sha256:".Length..] : s;
+        return IsDigest64(s) ? s : null;
     }
 
     private static bool IsDigest64(string s)
         => s.Length == 64 && s.All(ch => (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f'));
+}
+
+internal static class PinnedValidator
+{
+    public sealed record Result(bool IsValid, string? Detail);
+
+    public static Result Validate(PinnedV1 pinned)
+    {
+        if (pinned.SchemaVersion != 1)
+            return new Result(false, $"pinned schema_version must be 1 (got {pinned.SchemaVersion})");
+
+        if (pinned.Models is null || pinned.Models.Count == 0)
+            return new Result(false, "pinned models map is empty");
+
+        var missing = new List<string>();
+
+        foreach (var (role, tiers) in pinned.Models)
+        {
+            foreach (var (tier, entry) in tiers)
+            {
+                if (entry is null) continue;
+
+                if (entry.Required)
+                {
+                    if (string.IsNullOrWhiteSpace(entry.Tag) || string.IsNullOrWhiteSpace(entry.Digest))
+                        missing.Add($"{role}.{tier}");
+                }
+            }
+        }
+
+        return missing.Count == 0
+            ? new Result(true, null)
+            : new Result(false, $"missing required pins: {string.Join(", ", missing)}");
+    }
+}
+
+internal static class PinnedVerifier
+{
+    public static bool VerifyDigests(PinnedV1 pinned, OllamaTags tags, out string? detail)
+    {
+        detail = null;
+
+        var live = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var m in tags.Models)
+        {
+            if (string.IsNullOrWhiteSpace(m.Name) || string.IsNullOrWhiteSpace(m.Digest)) continue;
+            live[m.Name] = NormalizeDigest(m.Digest)!;
+        }
+
+        var mismatches = new List<string>();
+
+        foreach (var (role, tiers) in pinned.Models)
+        {
+            foreach (var (tier, entry) in tiers)
+            {
+                var tag = (entry.Tag ?? "").Trim();
+                var dig = NormalizeDigest(entry.Digest);
+
+                if (tag.Length == 0) continue;
+                if (dig is null) continue; // planned/not pinned yet
+
+                if (!live.TryGetValue(tag, out var got))
+                {
+                    mismatches.Add($"{role}.{tier}: missing model tag {tag}");
+                    continue;
+                }
+
+                if (!string.Equals(got, dig, StringComparison.Ordinal))
+                    mismatches.Add($"{role}.{tier}: digest mismatch for {tag}");
+            }
+        }
+
+        if (mismatches.Count == 0) return true;
+
+        detail = string.Join("; ", mismatches);
+        return false;
+    }
+
+    private static string? NormalizeDigest(string? s)
+    {
+        s = (s ?? "").Trim().Trim('"').ToLowerInvariant();
+        if (s.Length == 0) return null;
+
+        if (s.StartsWith("sha256:", StringComparison.Ordinal))
+            s = s["sha256:".Length..];
+
+        return s;
+    }
+}
+
+internal sealed record ResolvedModel(string Tag, string Digest);
+
+internal static class PinsResolver
+{
+    public static bool TryResolveModel(PinnedV1 pinned, PinsSettings policy, string role, string tier, out ResolvedModel model, out string? resolution, out ErrorResponse? err)
+    {
+        model = new ResolvedModel("", "");
+        resolution = null;
+        err = null;
+
+        var mode = (policy.Mode ?? "strict").Trim().ToLowerInvariant();
+        var fbRole = (policy.FallbackRole ?? "general").Trim().ToLowerInvariant();
+        var fbTier = (policy.FallbackTier ?? "fast").Trim().ToLowerInvariant();
+
+        bool strict = mode != "fallback";
+
+        // 1) Try direct.
+        if (TryGetPinned(pinned, role, tier, out var direct))
+        {
+            model = direct;
+            return true;
+        }
+
+        if (strict)
+        {
+            err = new ErrorResponse(
+                "PIN_NO_MATCH",
+                $"No usable pinned model for role={role} tier={tier}",
+                Detail: "Pin is missing or has digest=null",
+                Hint: "Update pinned.yaml or switch pins.mode to fallback in settings.yaml.");
+            return false;
+        }
+
+        // 2) Fallback.
+        if (TryGetPinned(pinned, fbRole, fbTier, out var fb))
+        {
+            model = fb;
+            resolution = $"fallback:{fbRole}.{fbTier}";
+            return true;
+        }
+
+        err = new ErrorResponse(
+            "PIN_NO_MATCH",
+            $"No usable pinned model for role={role} tier={tier} and fallback={fbRole}.{fbTier}",
+            Detail: "Pin is missing or has digest=null",
+            Hint: "Ensure fallback_role/fallback_tier points to a pinned model with a non-null digest.");
+        return false;
+    }
+
+    public static string? TryExplainResolution(PinnedV1? pinned, PinsSettings policy, ConversationDto convo)
+    {
+        if (pinned is null) return null;
+
+        if (!TryResolveModel(pinned, policy, convo.Role, convo.Tier, out var resolved, out var resolution, out _))
+            return null;
+
+        // If the current policy would resolve to the same model, treat as no special resolution.
+        if (string.Equals(resolved.Tag, convo.ModelTag, StringComparison.Ordinal) &&
+            string.Equals(resolved.Digest, convo.ModelDigest, StringComparison.Ordinal))
+        {
+            return null;
+        }
+
+        return resolution;
+    }
+
+    private static bool TryGetPinned(PinnedV1 pinned, string role, string tier, out ResolvedModel model)
+    {
+        model = new ResolvedModel("", "");
+
+        if (!pinned.Models.TryGetValue(role, out var tiers) || tiers is null)
+            return false;
+
+        if (!tiers.TryGetValue(tier, out var entry) || entry is null)
+            return false;
+
+        var tag = (entry.Tag ?? "").Trim();
+        var dig = (entry.Digest ?? "").Trim().ToLowerInvariant();
+
+        if (tag.Length == 0) return false;
+        if (dig.Length != 64) return false;
+
+        model = new ResolvedModel(tag, dig);
+        return true;
+    }
 }
 
 // --------------------------- Ollama NDJSON parsing ---------------------------
@@ -886,13 +1006,6 @@ internal static class OllamaNdjson
 
 // Ollama request/response DTOs
 internal sealed record OllamaVersion([property: JsonPropertyName("version")] string Version);
-
-internal sealed record OllamaTags([property: JsonPropertyName("models")] List<OllamaModel> Models);
-
-internal sealed record OllamaModel(
-    [property: JsonPropertyName("name")] string? Name,
-    [property: JsonPropertyName("digest")] string? Digest
-);
 
 internal sealed record OllamaChatRequest(
     [property: JsonPropertyName("model")] string Model,
