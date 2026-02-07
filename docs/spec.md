@@ -97,10 +97,9 @@ These decisions represent the intended design direction and remain fixed unless 
 * `config\profiles\agent.yaml`
 * `logs\bootstrap\status.json` (M0 snapshot; tracked even though logs are otherwise ignored)
 * `exports\` (conversation exports, backup bundles)
-* `bin\` (Windows launcher + UI binaries)
-  * `aetherforge.ps1`
-  * `aetherforge.cmd`
-  * `aetherforge-ui.exe` (M4+)
+* `scripts\`
+  * `aether.ps1` (wrapper for `scripts\commands\*.ps1`)
+  * `commands\` (PowerShell command scripts)
 
 ### 4.2 WSL filesystem (performance‑sensitive runtime data)
 * `/opt/aetherforge/` (service code/runtime)
@@ -180,7 +179,7 @@ M1 must prove the Windows host can call the Core API reliably.
 3) Stop Ollama.
 
 ### 7.2 Autostart
-Autostart is implemented via a Windows Scheduled Task (on logon).  It can be toggled via the UI (M4) or via `aetherforge.ps1 --autostart on|off`.
+Autostart is implemented via a Windows Scheduled Task (on logon).  It can be toggled via the UI (M4) or via `scripts\aether.ps1 --autostart on|off`.
 
 ### 7.3 Pinning and update policy
 Pins are recorded at `D:\Aetherforge\config\pinned.yaml`.  A pin manifest defines which model tag and digest should be used for each role/tier.  Model digests come from Ollama’s `/api/tags` and should be normalised to lowercase 64‑character hex without a `sha256:` prefix.
@@ -245,7 +244,7 @@ Upgrades are explicit.  To upgrade a model:
 3) Write a dated backup copy of the old manifest alongside it (for rollback).
 
 ### 7.4 `status` contract
-`aetherforge.ps1 status` provides human output and a `--json` mode.  The `/v1/status` API returns the same information in machine‑readable form.
+`scripts\aether.ps1 status` provides human output and a `--json` mode.  The `/v1/status` API returns the same information in machine‑readable form.
 
 #### 7.4.1 Stable JSON keys (minimum)
 * `schema_version` — response schema version (always 1 for MVP).
@@ -256,6 +255,7 @@ Upgrades are explicit.  To upgrade a model:
   * `base_url` (string) — canonical Core base URL.
 * `ollama:`
   * `reachable` (bool) — whether Ollama responded.
+  * `base_url` (string) — canonical Ollama base URL.
   * `version` (string or null) — Ollama version.
   * `models_dir` (string or null) — canonical models directory (e.g. `/var/lib/ollama`).
 * `pins:`
@@ -309,7 +309,7 @@ Tables:
   * `id` INTEGER PK
   * `created_utc` TEXT
   * `role` TEXT (`general`|`coding`|`agent`)
-  * `tier` TEXT (`fast`|`thinking`)
+  * `tier` TEXT (role‑dependent: `fast`|`thinking` for `general`/`coding`; `primary`|`verifier` for `agent`)
   * `model_tag` TEXT
   * `model_digest` TEXT
   * `title` TEXT
@@ -469,7 +469,7 @@ Audit requirements:
 ---
 
 ## 12. Implementation plan (milestones)
-(See `AetherRoadmap.md` and checklist files; these are authoritative for sequencing and gates.)
+(See `roadmap.md` and checklist files; these are authoritative for sequencing and gates.)
 
 ### 12.1 M0 — Bootstrap substrate
 * WSL2 + mirrored networking.
