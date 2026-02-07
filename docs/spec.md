@@ -6,6 +6,7 @@ Aetherforge is a **local‑first AI assistant stack** hosted on **SAM‑DESKTOP*
 It supports:
 
 * **General**, **Coding** and **Agent** roles (Agent arrives in Phase 2)
+* **Agent** is gated by `settings.yaml: agent.enabled` and is only implemented at M6
 * **Fast** and **Thinking** tiers for **General** and **Coding** roles
 * **Primary** and **Verifier** tiers for the **Agent** role (Agent runs primary first, then verifier)
 * **Offline operation** once models are pulled
@@ -67,7 +68,7 @@ These decisions represent the intended design direction and remain fixed unless 
 1) **WSL2 distro** (Ubuntu recommended)
 2) **Ollama (Linux) in WSL2** — model runtime + HTTP API (WSL‑local)
 3) **Aetherforge Core (Linux service)** — chat orchestration, persistence, exports, tools
-4) **Aetherforge Windows Launcher (PowerShell)** — lifecycle + CLI chat + status + backup/restore
+4) **Aetherforge Windows Launcher (PowerShell)** — stable entrypoint `D:\Aetherforge\bin\aetherforge.ps1` delegating into `D:\Aetherforge\scripts\aether.ps1` + `scripts\commands\*.ps1` (lifecycle + CLI chat + status + backup/restore)
 5) **Aetherforge Desktop UI (Windows)** — native GUI consuming the Core API
 6) **Tailscale Serve (Windows, post‑MVP)** — expose Core API to tailnet only
 
@@ -88,32 +89,40 @@ These decisions represent the intended design direction and remain fixed unless 
 
 ## 4. Filesystem layout
 
-### 4.1 Windows root (human‑editable + artifacts)
+### 4.1 Windows root (human‑editable + repo workspace + artifacts)
 `D:\Aetherforge\`
 * `config\settings.yaml` (global settings)
 * `config\pinned.yaml` (pin manifest)
 * `config\profiles\general.yaml`
 * `config\profiles\coding.yaml`
-* `config\profiles\agent.yaml`
+* `config\profiles\agent.yaml` (present even if agent is disabled; used only when `agent.enabled=true`)
 * `logs\bootstrap\status.json` (M0 snapshot; tracked even though logs are otherwise ignored)
 * `exports\` (conversation exports, backup bundles)
+* `bin\`
+  * `aetherforge.ps1` (**stable user‑facing entrypoint**) — thin wrapper that delegates to `scripts\aether.ps1`
+  * (other build/publish outputs; generated; not source)
 * `scripts\`
-  * `aether.ps1` (wrapper for `scripts\commands\*.ps1`)
+  * `aether.ps1` (internal dispatcher; routes to `scripts\commands\*.ps1`)
   * `commands\` (PowerShell command scripts)
+* `src\` (repo source)
+* `wsl\` (repo WSL helper scripts; dev‑mode run + smoke)
 
-### 4.2 WSL filesystem (performance‑sensitive runtime data)
-* `/opt/aetherforge/` (service code/runtime)
+### 4.2 WSL filesystem (performance‑sensitive runtime data; M0–M4)
+* **Dev‑mode execution:** Core is executed from the repo workspace mounted under `/mnt/d/Aetherforge/...` (no installed runtime path in M1).
 * `/var/lib/aetherforge/`
   * `conversations.sqlite`
   * `indexes/` (local‑search index; Phase 2)
 * `/var/lib/ollama/` (models; canonical model store)
 
----
+### 4.3 WSL installed runtime (future; M5+ hardening)
+* `/opt/aetherforge/<version>/` (published runtime bits)
+* `/opt/aetherforge/current` (optional symlink to active version for atomic upgrade/rollback)
+* When implemented, systemd services point to `/opt/aetherforge/current/...` rather than the repo workspace.
 
 ## 5. Model suite and role/tier mapping
 
 ### 5.1 Required models (pins)
-Pins map each `{role, tier}` to a model tag.  A digest is recorded in `pinned.yaml` once the model is pulled.  When running in **strict** mode, every role/tier must have a non‑null digest pinned; missing digests cause conversation creation to fail.  In **fallback** mode (see §5.2), only the configured fallback role/tier must have a pinned digest.
+Pins map each `{role, tier}` to a model tag.  A digest is recorded in `pinned.yaml` once the model is pulled.  When running in **strict** mode, every **required** role/tier must have a non‑null digest pinned; missing digests cause conversation creation to fail. Required role/tier set = General+Coding always, plus Agent only when `agent.enabled=true`.  In **fallback** mode (see §5.2), only the configured fallback role/tier must have a pinned digest.
 
 * **General:**
   * **Fast:** `qwen2.5:7b‑instruct`
@@ -125,12 +134,16 @@ Pins map each `{role, tier}` to a model tag.  A digest is recorded in `pinned.ya
   * **Primary:** `gpt-oss:20b`
   * **Verifier:** `gpt-oss-safeguard:20b`
 
+> **Agent pins gate:** Agent models are only required/pulled/pinned when `settings.yaml: agent.enabled=true`. If `agent.enabled=false`, Core rejects `role=agent` requests and `pins_match` does not require Agent entries.
+
 > **Note:** In Agent mode, two models are involved: a **primary** model that performs the task and a **verifier** model that checks the primary’s output for safety or correctness. Both must be pulled and pinned in `pinned.yaml` when Agent mode is enabled.
 
 ### 5.2 Routing and fallback rules
 * **Manual role/tier selection:**  The user chooses `{role, tier}` explicitly (UI selector; CLI flags).  Each conversation records the chosen role and tier along with the resolved model tag and digest at creation time.  Changing the role or tier mid‑conversation starts a **new conversation**.
 * **Per‑conversation pinning:**  On conversation creation, Core consults `pinned.yaml` and pins the resolved `{model_tag, model_digest}` to the conversation.  This ensures deterministic exports and replay.
-* **Fallback policy:**  Core reads `pins.mode` from `settings.yaml`.  In `strict` mode, every requested role/tier must exist in `pinned.yaml` with a non‑null digest; otherwise conversation creation fails.  In `fallback` mode, if the requested role/tier is missing or unpinned (null digest), Core looks up `pins.fallback_role` and `pins.fallback_tier` from `settings.yaml` and uses that entry’s tag and digest while preserving the user’s requested role and tier in the conversation metadata.  The fallback role/tier **must** exist in `pinned.yaml` with a non‑null digest.  Core includes a `resolution` hint (see §10.3) when a fallback is applied.
+* **Fallback policy:**  Core reads `pins.mode` from `settings.yaml`.  In `strict` mode, every requested role/tier must exist in `pinned.yaml` with a non‑null digest; otherwise conversation creation fails.  In `fallback` mode, if the requested role/tier is missing or unpinned (null digest), Core looks up `pins.fallback_role` and `pins.fallback_tier` from `settings.yaml` and uses that entry’s tag and digest while preserving the user’s requested role and tier in the conversation metadata.  The fallback role/tier **must** exist in `pinned.yaml` with a non‑null digest.
+
+* **Agent behavior (until M6):** If `agent.enabled=false`, Core rejects `role=agent` requests. If `agent.enabled=true`, agent role/tier must be explicitly pinned (no fallback across into General/Coding unless you intentionally request that via UI/CLI by changing role).  Core includes a `resolution` hint (see §10.3) when a fallback is applied.
 
 ### 5.3 Tier semantics
 * **Fast:**  lower latency parameters and lower reasoning verbosity (or disabled where supported).
@@ -166,6 +179,21 @@ M1 must prove the Windows host can call the Core API reliably.
 
 ## 7. Runtime management, pinning, status, backups
 
+
+### 7.0 Windows launcher command surface
+**Stable entrypoint:** `D:\Aetherforge\bin\aetherforge.ps1`.
+
+* `D:\Aetherforge\bin\aetherforge.ps1` is a thin, stable wrapper intended for docs/checklists and user invocation.
+* It delegates to `D:\Aetherforge\scripts\aether.ps1`, which dispatches to `D:\Aetherforge\scripts\commands\*.ps1`.
+* **Command semantics:**
+  * `dev-core` starts the Core in dev‑mode (M0–M4).
+  * `start` is reserved for launching the Desktop UI at M4+. Until then, `start` may remain a shim that indirectly runs `dev-core`.
+
+Invocation pattern (deterministic):
+* `& D:\Aetherforge\bin\aetherforge.ps1 <command> [args...]`
+
+(Interactive convenience aliases like `aether <command>` are optional and are not part of the contract.)
+
 ### 7.1 Start/stop behaviour
 **Start:**
 1) Ensure WSL is running.
@@ -179,7 +207,7 @@ M1 must prove the Windows host can call the Core API reliably.
 3) Stop Ollama.
 
 ### 7.2 Autostart
-Autostart is implemented via a Windows Scheduled Task (on logon).  It can be toggled via the UI (M4) or via `scripts\aether.ps1 --autostart on|off`.
+Autostart is implemented via a Windows Scheduled Task (on logon). It can be toggled via the UI (M4) or via `D:\Aetherforge\bin\aetherforge.ps1 autostart on|off`.
 
 ### 7.3 Pinning and update policy
 Pins are recorded at `D:\Aetherforge\config\pinned.yaml`.  A pin manifest defines which model tag and digest should be used for each role/tier.  Model digests come from Ollama’s `/api/tags` and should be normalised to lowercase 64‑character hex without a `sha256:` prefix.
@@ -244,7 +272,7 @@ Upgrades are explicit.  To upgrade a model:
 3) Write a dated backup copy of the old manifest alongside it (for rollback).
 
 ### 7.4 `status` contract
-`scripts\aether.ps1 status` provides human output and a `--json` mode.  The `/v1/status` API returns the same information in machine‑readable form.
+`D:\Aetherforge\bin\aetherforge.ps1 status` provides human output and a `--json` mode.  The `/v1/status` API returns the same information in machine‑readable form.
 
 #### 7.4.1 Stable JSON keys (minimum)
 * `schema_version` — response schema version (always 1 for MVP).
@@ -308,7 +336,7 @@ Tables:
 * `conversations`
   * `id` INTEGER PK
   * `created_utc` TEXT
-  * `role` TEXT (`general`|`coding`|`agent`)
+  * `role` TEXT (`general`|`coding`|`agent`) — `agent` is only valid when `settings.yaml: agent.enabled=true` and Phase 2 is implemented
   * `tier` TEXT (role‑dependent: `fast`|`thinking` for `general`/`coding`; `primary`|`verifier` for `agent`)
   * `model_tag` TEXT
   * `model_digest` TEXT
@@ -331,44 +359,43 @@ Tables:
 > **Note (WSL + scripting reality):** when initializing the DB from Windows via `wsl.exe -- bash -lc <script>`, CRLF and quoting can corrupt multi‑line SQL/heredocs.  See §15 (Quirks).
 
 ### 8.3 YAML config (MVP)
-`D:\Aetherforge\config\settings.yaml` holds runtime settings.  Required keys:
+`D:\Aetherforge\config\settings.yaml` holds runtime settings.
+
+Required top‑level blocks (present in all environments):
 
 * **schema_version:** integer (should be 1).
 * **captured_utc:** ISO‑8601 timestamp or null.
 * **ports:**
   * `core_bind_url` — absolute HTTP URL for the Core API (must use host `127.0.0.1`).
   * `ollama_base_url` — absolute HTTP URL for the Ollama API (must use host `127.0.0.1`).
-* **defaults:**
-  * `role` — default role (`general`|`coding`|`agent`).
-  * `tier` — default tier (role‑dependent):
-    * `fast`|`thinking` for `general` and `coding`
-    * `primary`|`verifier` for `agent` (UI typically selects `primary`; verifier still runs as a second step)
+* **defaults:** (MVP default selector; Agent is not a default)
+  * `role` — default role (`general`|`coding`).
+  * `tier` — default tier (`fast`|`thinking`).
 * **pins:**
-  * `mode` — `strict` or `fallback`.  See §5.2.
-  * `fallback_role` — role to use in fallback mode when requested role/tier is unpinned.
-  * `fallback_tier` — tier to use in fallback mode when requested role/tier is unpinned (role‑dependent tier set as above).
-* **profiles:**
+  * `mode` — `strict` or `fallback`. See §5.2.
+  * `fallback_role` — role to use in fallback mode when requested role/tier is unpinned (`general`|`coding`).
+  * `fallback_tier` — tier to use in fallback mode when requested role/tier is unpinned (`fast`|`thinking`).
+* **profiles:** (system prompts)
   * `root_wsl` — WSL path containing system prompt files.
-  * `by_role` — map of role name → filename (e.g. `general: "general.yaml"`).
-* **generation:**
-  * `by_profile` — nested map of role → tier → parameter values; each value is an object with optional `temperature`, `top_p`, `top_k`, `num_ctx`, `num_predict`, `repeat_penalty` and `seed`.  Null values indicate defaults should be used.
+  * `by_role` — map of role name → filename. Must include `general` and `coding`. Include `agent` only when `agent.enabled=true`.
+* **generation:** (generation parameter presets)
+  * `by_profile` — nested map of role → tier → parameter values; each value is an object with optional `temperature`, `top_p`, `top_k`, `num_ctx`, `num_predict`, `repeat_penalty` and `seed`. Null values indicate defaults should be used. Must include `general` and `coding`. Include `agent` only when `agent.enabled=true`.
 * **autostart:**
   * `enabled` — bool.
   * `windows_scheduled_task_name` — name of the scheduled task or null.
 * **boundary:**
-  * `bridge_rules` — list of objects mapping Windows paths (`windows_root`) to WSL paths (`wsl_root`).  Only explicitly mapped prefixes are permitted; unknown mappings are denied.
+  * `bridge_rules` — list of objects mapping Windows paths (`windows_root`) to WSL paths (`wsl_root`). Only explicitly mapped prefixes are permitted; unknown mappings are denied.
   * `roots:`
-    * `wsl.config` — absolute WSL path for configuration files (e.g. `/mnt/d/Aetherforge/config`).
+    * `wsl.config` — absolute WSL path for configuration files (e.g. `/mnt/d/Aetherforge/config`).
     * `wsl.exports` — absolute WSL path for exports directory.
     * `wsl.logs` — absolute WSL path for logs directory.
   * `block_reparse_points` — bool; when true, deny writes through reparse points/symlinks.
-  * `allow_write_under_wsl` — list of WSL paths under which the Core is allowed to write.  Must include the config, exports and logs roots.
+  * `allow_write_under_wsl` — list of WSL paths under which the Core is allowed to write. Must include the config, exports and logs roots.
   * `allow_read_under_wsl` — list of WSL paths that may be read (optional; empty by default).
-* **agent:**
-  * `enabled` — bool.
+* **agent:** (post‑MVP gate; required block but default‑disabled)
+  * `enabled` — bool. When false, Core rejects `role=agent` conversation creation.
   * `require_plan_approval` — bool; if true, agent tool plans must be explicitly approved by the user.
   * `allow_tools` — list of allowed tool names (empty list means no tools are permitted).
-
 ---
 
 ## 9. Filesystem boundary policy (allowlists)
@@ -492,11 +519,13 @@ Audit requirements:
 * Offline validation.
 
 ### 12.4 M3 — Windows launcher + autostart + backups
+* Stable launcher entrypoint at `D:\Aetherforge\bin\aetherforge.ps1` delegating into `scripts\aether.ps1`.
 * Lifecycle + status --json.
 * Standardised errors.
 * Backup Bundle backup/restore.
 
 ### 12.5 M4 — Desktop‑native UI (MVP)
+* `aether start` launches the Desktop UI (until M4, `start` may remain a shim that indirectly runs `dev-core`).
 * WPF UI layered over Core API.
 * Streaming chat (SSE).
 * Conversation list/search + title edit.
