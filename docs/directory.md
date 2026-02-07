@@ -12,6 +12,8 @@ D:\Aetherforge\
 ├─ NuGet.config
 ├─ .github\
 │  └─ workflows\
+├─ bin\
+│  └─ aetherforge.ps1
 ├─ config\
 │  ├─ pinned.yaml
 │  ├─ settings.yaml
