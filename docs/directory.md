@@ -26,6 +26,7 @@ D:\Aetherforge\
 │  ├─ directory.md
 │  ├─ spec.md
 │  ├─ roadmap.md
+│  ├─ network_specs.md
 │  ├─ AetherChecklist.M0.md
 │  ├─ AetherChecklist.M1.md
 │  ├─ AetherChecklist.M2.md
