@@ -46,7 +46,7 @@ Prove the **runtime substrate** is real and repeatable:
   - `D:\Aetherforge\bin\`
 
 ### 5) Initial config scaffolding (spec schema v1)
-- [ ] Create `D:\Aetherforge\config\settings.yaml` (schema v1) with **all required blocks present**. Even if values are placeholders, include the following keys:
+- [x] Create `D:\Aetherforge\config\settings.yaml` (schema v1) with **all required blocks present**. Even if values are placeholders, include the following keys:
   - `schema_version: 1`
   - `ports.core_bind_url`: `http://127.0.0.1:8484`
   - `ports.ollama_base_url`: `http://127.0.0.1:11434`
@@ -55,7 +55,7 @@ Prove the **runtime substrate** is real and repeatable:
   - `pins.mode`: `fallback` (recommended for early dev) OR `strict` (allowed)
   - `pins.fallback_role`: `general` (must be `general` or `coding`)
   - `pins.fallback_tier`: `fast` (must be `fast` or `thinking`)
-  - `profiles`: include `general` and `coding`; include `agent` only for completeness (unused while `agent.enabled=false`)
+  - `profiles`: include `general` and `coding`; include `agent` **only when** `agent.enabled=true`
   - `generation`: include `by_profile` with nested `general` and `coding` tiers; placeholder values may be null
   - `autostart`: set `enabled: false` and `windows_scheduled_task_name: null`
   - `boundary`: skeleton with `roots`, `bridge_rules`, `allow_write_under_wsl`, `allow_read_under_wsl`, `block_reparse_points` (placeholders OK; structure must be valid)
@@ -79,9 +79,8 @@ Goal: pin at least the fallback target (default `general.fast`).
   - Note: the fallback target should always be marked `required: true` so fallback mode remains deterministic.
 - [x] Verify pinned digest matches live digest (`/api/tags`) via scripted check (expected: `OK`)
 - [x] Run a smoke prompt via Ollama API (reachability + model works)
-- [ ] (Optional but spec-friendly) Add placeholder entries with `digest: null` for:
+- [x] (Optional but spec-friendly) Add placeholder entries with `digest: null` for:
   - `general.thinking`, `coding.fast`, `coding.thinking`
-  - `agent.primary`, `agent.verifier`
   - Mark `required: false` for placeholders at M0 (only the fallback entry should be required this early).
 
 ### 7) Bootstrap status snapshot (pre-Core)

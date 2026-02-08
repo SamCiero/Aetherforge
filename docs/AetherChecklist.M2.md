@@ -27,10 +27,9 @@ Deliver a usable **CLI-first** core assistant for daily evaluation:
   - `models.coding.fast`
   - `models.coding.thinking`
 - [ ] Mark `required: true` for all General/Coding entries (recommended once pinned)
-- [ ] Keep Agent placeholders (optional at M2, since Agent is M6):
-  - `models.agent.primary` (digest may remain null)
-  - `models.agent.verifier` (digest may remain null)
-  - `required: false` for placeholders (until M6)
+- [ ] Agent pins gate per spec:
+  - When `agent.enabled=false`, `pinned.yaml` does **not** need `models.agent.*` entries (omit them).
+  - Core rejects `role=agent` requests until Agent mode is implemented (M6).
 - [ ] Normalize digests in `pinned.yaml`:
   - lowercase 64-hex
   - no `sha256:` prefix stored

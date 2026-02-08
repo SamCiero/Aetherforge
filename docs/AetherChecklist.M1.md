@@ -34,16 +34,16 @@ It **does** aim to provide:
 - [x] Core binds to canonical loopback:
   - **`http://127.0.0.1:8484`**
 - [x] Minimal `/v1/status` endpoint reachable from Windows host
-- [ ] Replace bootstrap-only status logic with the **spec status contract** (deterministic fields):
-  - [ ] `schema_version` (always 1)
-  - [ ] `captured_utc` (UTC ISO-8601)
-  - [ ] `core: { reachable, version, base_url }`
-  - [ ] `ollama: { reachable, version, base_url, models_dir? }` (models_dir may be null if unknown)
-  - [ ] `pins: { pinned_yaml_path, pins_match, model_digests_match, detail }`
-  - [ ] `db: { path, healthy, error }`
-  - [ ] `gpu: { visible, evidence }`
-  - [ ] `tailnet: { serve_enabled, published_port }` (may be false/null in M1)
-  - [ ] `files: { settings_exists, pinned_exists }`
+- [x] Replace bootstrap-only status logic with the **spec status contract** (deterministic fields):
+  - [x] `schema_version` (always 1)
+  - [x] `captured_utc` (UTC ISO-8601)
+  - [x] `core: { reachable, version, base_url }`
+  - [x] `ollama: { reachable, version, base_url, models_dir? }` (models_dir may be null if unknown)
+  - [x] `pins: { pinned_yaml_path, pins_match, model_digests_match, detail }`
+  - [x] `db: { path, healthy, error }`
+  - [x] `gpu: { visible, evidence }`
+  - [x] `tailnet: { serve_enabled, published_port }` (may be false/null in M1)
+  - [x] `files: { settings_exists, pinned_exists }`
 
 ---
 
@@ -54,21 +54,21 @@ It **does** aim to provide:
   - `http://127.0.0.1:8484`
 - [x] `localhost` explicitly treated as forbidden for normal operation
 - [ ] SSE streaming validated end-to-end from Windows host (not buffered):
-  - [ ] `POST /v1/chat` streams `meta` then `delta` events incrementally
+  - [x] `POST /v1/chat` streams `meta` then `delta` events incrementally
 
 ---
 
 ### 3) Settings loading + validation (spec requirement)
-- [ ] Load `config/settings.yaml` with a real YAML parser
-- [ ] Enforce `settings.yaml` schema version = 1
+- [x] Load `config/settings.yaml` with a real YAML parser
+- [x] Enforce `settings.yaml` schema version = 1
 - [ ] Validate required sections and constraints:
-  - [ ] `ports.core_bind_url` and `ports.ollama_base_url` are absolute HTTP URLs using host `127.0.0.1`
+  - [x] `ports.core_bind_url` and `ports.ollama_base_url` are absolute HTTP URLs using host `127.0.0.1`
   - [ ] `defaults.role` in `{general,coding}` (Agent cannot be the default)
-  - [ ] `defaults.tier` in `{fast,thinking}`
-  - [ ] `pins.mode` in `{strict,fallback}`
+  - [x] `defaults.tier` in `{fast,thinking}`
+  - [x] `pins.mode` in `{strict,fallback}`
   - [ ] `pins.fallback_role` in `{general,coding}` (Agent must not be used as a fallback role)
-  - [ ] `pins.fallback_tier` in `{fast,thinking}` (fallback applies only to General/Coding roles)
-  - [ ] Boundary config validated (see §5)
+  - [x] `pins.fallback_tier` in `{fast,thinking}` (fallback applies only to General/Coding roles)
+  - [x] Boundary config validated (see §5)
 - [ ] Ensure settings-load errors are surfaced deterministically:
   - [ ] `/v1/status` `files.settings_exists=true` but includes a clear `detail` somewhere appropriate (or stable error code) when settings invalid
   - [ ] Core startup behavior defined: either fail-fast OR start with safe defaults (but must be explicit and observable)
@@ -82,39 +82,39 @@ It **does** aim to provide:
   - `/var/lib/aetherforge/conversations.sqlite`
 - [x] WAL mode enabled and persisted
 - [x] `meta` table exists with `schema_version`
-- [ ] Implement full schema (spec-aligned):
-  - [ ] `conversations` table:
+- [x] Implement full schema (spec-aligned):
+  - [x] `conversations` table:
     - `id`, `created_utc`, `role`, `tier`, `model_tag`, `model_digest`, `title`
     - Note: `tier` is role-dependent (`fast/thinking` for general/coding; `primary/verifier` for agent)
-  - [ ] `messages` table:
+  - [x] `messages` table:
     - `id`, `conversation_id`, `created_utc`, `sender`, `content`, `meta_json`
-- [ ] Add required indices:
-  - [ ] `messages(conversation_id)`
-  - [ ] `messages(created_utc)` (or `(conversation_id, id)` depending on retrieval strategy)
-  - [ ] `conversations(created_utc)` (optional but recommended)
+- [x] Add required indices:
+  - [x] `messages(conversation_id)`
+  - [x] `messages(created_utc)` (or `(conversation_id, id)` depending on retrieval strategy)
+  - [x] `conversations(created_utc)` (optional but recommended)
 - [ ] Implement minimal deterministic migration mechanism:
   - [ ] schema version check
   - [ ] apply migrations in order
   - [ ] record applied version
-- [ ] Enforce foreign keys
+- [x] Enforce foreign keys
 - [ ] Implement retry/backoff rules for busy DB (beyond PRAGMA), consistent with spec
-- [ ] Ensure DB open/health check used by `/v1/status`
+- [x] Ensure DB open/health check used by `/v1/status`
 
 ---
 
 ### 5) Contracts + DTOs (single source of truth)
 - [ ] Define API DTOs in `Aetherforge.Contracts` (or equivalent shared assembly) and use them exclusively:
-  - [ ] Status DTOs:
+  - [x] Status DTOs:
     - `StatusResponse` (+ nested `Core/Ollama/Pins/Db/Gpu/Tailnet/Files` DTOs)
-  - [ ] Conversations:
+  - [x] Conversations:
     - `ConversationCreateRequest`
     - `ConversationDto`
     - `ConversationWithMessagesDto`
     - `ConversationListResponse` (includes limit/offset/q echo)
     - `ConversationPatchRequest` (title only)
-  - [ ] Messages:
+  - [x] Messages:
     - `MessageDto`
-  - [ ] Chat:
+  - [x] Chat:
     - `ChatRequest`
     - SSE event payload DTOs:
       - `SseMetaEvent` includes: `conversation_id`, `message_id`, `model_tag`, `model_digest`, `resolution` (nullable)
@@ -123,23 +123,23 @@ It **does** aim to provide:
   - [ ] Export:
     - `ConversationExportV1` + nested `ExportConversation`, `ExportModel`, `ExportMessage`
     - `ExportResponse` (paths)
-- [ ] Define canonical `ErrorResponse` DTO:
+- [x] Define canonical `ErrorResponse` DTO:
   - `code`, `message`, optional `detail`, optional `hint`
 - [ ] Core uses Contracts DTOs exclusively (no anonymous/inline response shapes)
 
 ---
 
 ### 6) Filesystem boundary enforcement (spec requirement)
-- [ ] Load boundary configuration from `config/settings.yaml`
-- [ ] Enforce boundary schema and validation:
-  - [ ] `boundary.bridge_rules[]` exists and has at least one rule
-  - [ ] `boundary.roots.wsl.{config,exports,logs}` exist and are absolute WSL paths
-  - [ ] `boundary.allow_write_under_wsl` exists and contains at least one root
-  - [ ] `boundary.allow_read_under_wsl` is allowed to be empty
-  - [ ] `boundary.block_reparse_points` honored (default true)
-- [ ] Canonicalize all paths before access
-- [ ] Enforce “descendant of allowlisted root” rule for writes
-- [ ] Block symlinks/reparse points by default (best-effort detection is acceptable but must be deterministic in behavior)
+- [x] Load boundary configuration from `config/settings.yaml`
+- [x] Enforce boundary schema and validation:
+  - [x] `boundary.bridge_rules[]` exists and has at least one rule
+  - [x] `boundary.roots.wsl.{config,exports,logs}` exist and are absolute WSL paths
+  - [x] `boundary.allow_write_under_wsl` exists and contains at least one root
+  - [x] `boundary.allow_read_under_wsl` is allowed to be empty
+  - [x] `boundary.block_reparse_points` honored (default true)
+- [x] Canonicalize all paths before access
+- [x] Enforce “descendant of allowlisted root” rule for writes
+- [x] Block symlinks/reparse points by default (best-effort detection is acceptable but must be deterministic in behavior)
 - [ ] Explicitly deny unknown/unsafe WSL↔Windows mappings per `bridge_rules`
 - [ ] Add negative tests/evidence:
   - traversal attempts (e.g. `..`)
@@ -151,24 +151,24 @@ It **does** aim to provide:
 ---
 
 ### 7) Pins manifest loading + verification (deterministic)
-- [ ] Parse `config/pinned.yaml` using a real YAML parser
-- [ ] Enforce pinned schema version = 1
-- [ ] Support null digests (unpinned placeholders)
-- [ ] Support optional per-entry `required: bool`
-- [ ] Normalize digests:
+- [x] Parse `config/pinned.yaml` using a real YAML parser
+- [x] Enforce pinned schema version = 1
+- [x] Support null digests (unpinned placeholders)
+- [x] Support optional per-entry `required: bool`
+- [x] Normalize digests:
   - lowercase
   - strip `sha256:` prefix if present
   - validate 64-hex when non-null
-- [ ] Verify digests against Ollama `/api/tags` when tags available
+- [x] Verify digests against Ollama `/api/tags` when tags available
 - [ ] `/v1/status` pins fields follow spec semantics:
   - [ ] `pins_match`:
     - `null` only if manifest missing/unreadable
     - `false` if required digests missing/invalid
     - `true` if required digests present and structurally valid
-  - [ ] `model_digests_match`:
+  - [x] `model_digests_match`:
     - `null` if tags cannot be fetched or manifest missing
     - otherwise bool reflecting digest equality vs live tags
-  - [ ] `detail` includes human-readable reason when pins_match is false (or manifest unreadable)
+  - [x] `detail` includes human-readable reason when pins_match is false (or manifest unreadable)
 
 ---
 
@@ -176,46 +176,46 @@ It **does** aim to provide:
 > M1 delivers the **contract and mechanics**. M2 is where role/tier coverage becomes a “daily assistant baseline” with acceptance-tested model suites.
 
 #### Status
-- [ ] `GET /v1/status` implements full spec schema (see §1)
+- [x] `GET /v1/status` implements full spec schema (see §1)
 
 #### Conversation lifecycle
-- [ ] `POST /v1/conversations`
+- [x] `POST /v1/conversations`
   - [ ] Validates role/tier:
     - roles: `general|coding|agent`
     - tiers: `fast|thinking` (general/coding) and `primary|verifier` (agent)
-  - [ ] Requires pinned manifest present (or deterministic error)
+  - [x] Requires pinned manifest present (or deterministic error)
   - [ ] Applies pins policy (`settings.pins.mode`)
     - strict: missing/unpinned => error
     - fallback: missing/unpinned => resolve to `pins.fallback_role/tier` entry
-  - [ ] Pins `{model_tag, model_digest}` at creation time
-  - [ ] Preserves requested `{role, tier}` even when fallback is used (truthful model fields still reflect actual model used)
-- [ ] `GET /v1/conversations/{id}`
-- [ ] `GET /v1/conversations?limit=&offset=&q=`
-  - [ ] Paging required
-  - [ ] Search by title (minimum)
-- [ ] `PATCH /v1/conversations/{id}`
-  - [ ] Title update only
+  - [x] Pins `{model_tag, model_digest}` at creation time
+  - [x] Preserves requested `{role, tier}` even when fallback is used (truthful model fields still reflect actual model used)
+- [x] `GET /v1/conversations/{id}`
+- [x] `GET /v1/conversations?limit=&offset=&q=`
+  - [x] Paging required
+  - [x] Search by title (minimum)
+- [x] `PATCH /v1/conversations/{id}`
+  - [x] Title update only
 
 #### Chat (streaming)
-- [ ] `POST /v1/chat`
-  - [ ] Server-Sent Events (SSE)
-  - [ ] Required events:
+- [x] `POST /v1/chat`
+  - [x] Server-Sent Events (SSE)
+  - [x] Required events:
     - `meta` (must include `resolution` when fallback applies)
     - `delta`
     - `done`
     - `error`
-  - [ ] `meta.resolution` format: `fallback:<role>.<tier>` (nullable when no fallback)
+  - [x] `meta.resolution` format: `fallback:<role>.<tier>` (nullable when no fallback)
   - [ ] Streaming works end-to-end from Windows host (incremental deltas)
-  - [ ] User + assistant messages persisted to DB
+  - [x] User + assistant messages persisted to DB
   - [ ] Cancellation does not deadlock DB or Ollama; partial assistant buffer persists safely
 
 #### Export
-- [ ] `POST /v1/export/{id}`
-- [ ] Writes to allowlisted exports root only (boundary enforced)
-- [ ] Generates:
+- [x] `POST /v1/export/{id}`
+- [x] Writes to allowlisted exports root only (boundary enforced)
+- [x] Generates:
   - Markdown transcript
   - JSON export
-- [ ] JSON export includes:
+- [x] JSON export includes:
   - `schema_version`
   - `generated_utc`
   - `core_version`
@@ -226,12 +226,12 @@ It **does** aim to provide:
 ---
 
 ### 9) Error model (mandatory)
-- [ ] All API errors use structured `ErrorResponse`:
+- [x] All API errors use structured `ErrorResponse`:
   - `code`, `message`, optional `detail`, optional `hint`
 - [ ] Stable error codes defined and reused (no one-off strings sprinkled everywhere)
-- [ ] SSE emits `event: error` with structured payload (same DTO)
-- [ ] No raw stack traces leak to clients
-- [ ] Boundary violations return deterministic boundary error codes and include allowed roots in `hint` when safe
+- [x] SSE emits `event: error` with structured payload (same DTO)
+- [x] No raw stack traces leak to clients
+- [x] Boundary violations return deterministic boundary error codes and include allowed roots in `hint` when safe
 
 ---
 
