@@ -111,7 +111,8 @@ logs/
 **/logs/
 *.etl
 *.dmp
-logs/bootstrap/status.json
+/logs/bootstrap/status.json
+/config/pinned.yaml
 
 # Local DB / runtime state if it ever lands under repo paths
 **/*.sqlite
