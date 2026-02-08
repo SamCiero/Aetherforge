@@ -36,7 +36,6 @@ profiles:
   by_role:
     general: "general.yaml"
     coding: "coding.yaml"
-    agent:  "agent.yaml"
 
 # -----------------------------
 # Generation parameters per role/tier (stored now; applied later)
@@ -64,24 +63,6 @@ generation:
         seed: null
 
     coding:
-      fast:
-        temperature: null
-        top_p: null
-        top_k: null
-        num_ctx: null
-        num_predict: null
-        repeat_penalty: null
-        seed: null
-      thinking:
-        temperature: null
-        top_p: null
-        top_k: null
-        num_ctx: null
-        num_predict: null
-        repeat_penalty: null
-        seed: null
-
-    agent:
       fast:
         temperature: null
         top_p: null

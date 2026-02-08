@@ -26,12 +26,3 @@ models:
       digest: null
       required: false
 
-  agent:
-    fast:
-      tag: "gpt-oss:20b"
-      digest: null
-      required: false
-    thinking:
-      tag: "gpt-oss:20b"
-      digest: null
-      required: false

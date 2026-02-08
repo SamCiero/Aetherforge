@@ -1,0 +1,194 @@
+devices:
+- machine_name: SAM-DESKTOP
+  role: Primary Desktop
+  os:
+    family: Windows
+    edition: 11 Home
+    version: 10.0.26200
+    build: '26200'
+    install_date: '2025-08-22T02:43:48'
+    product_key_channel: OEM
+    name: Microsoft Windows 11 Home
+    reported_fields:
+      OsVersion: 10.0.26200
+      OsBuildNumber: '26200'
+      WindowsProductName: Windows 10 Home
+      WindowsVersion: '2009'
+  firmware:
+    type: UEFI
+    vendor: American Megatrends International, LLC.
+    version: '1.20'
+    bios_release_date: '2025-08-07'
+    baseboard_product: MPG Z790 EDGE TI MAX WIFI (MS-7E25)
+  cpu:
+    model: 13th Gen Intel(R) Core(TM) i9-14900K
+    cores: 24
+    threads: 32
+    base_clock_ghz: 3.2
+  memory:
+    total_gb: 64
+    modules:
+    - capacity_gb: 32
+      speed_mhz_reported: 6200
+      manufacturer: TEAMGROUP Inc.
+      model: T-Force Delta
+      part_number: UD5-7200
+    - capacity_gb: 32
+      speed_mhz_reported: 6200
+      manufacturer: TEAMGROUP Inc.
+      model: T-Force Delta
+      part_number: UD5-7200
+    notes:
+    - Win32_PhysicalMemory reports Speed=6200 MHz for all modules; part number indicates UD5-7200 (likely rated 7200).
+  gpu:
+  - role: primary
+    manufacturer: NVIDIA
+    model: NVIDIA GeForce RTX 4080 SUPER
+    vram_gb: 16
+    vendor_id: '0x10DE'
+    device_id: '0x2702'
+  storage:
+    system_drive:
+      type: NVMe
+      model: Samsung SSD 980 PRO 2TB
+      capacity_gb: 2000
+      interface: PCIe
+  motherboard:
+    manufacturer: Micro-Star International Co., Ltd.
+    model: MPG Z790 EDGE TI MAX WIFI
+  psu:
+    manufacturer: MSI
+    model: A1000G
+    wattage: 1000
+    certification: 80+ Gold
+    modular: true
+  network:
+    adapters:
+    - name: Ethernet
+      interface: Intel(R) Ethernet Controller (3) I225-V
+      mac_address: <SAM-DESKTOP_ETH0_MAC>
+      ipv4_address: 192.168.40.<SAM-DESKTOP_LAN_IP>/24
+      ipv6_enabled: true
+    - name: Wi-Fi
+      interface: Intel(R) Wi-Fi 6E AX211 160MHz
+      mac_address: <SAM-DESKTOP_WIFI_MAC>
+      ipv4_address: 192.168.40.<SAM-DESKTOP_WIFI_IP>/24
+      ipv6_enabled: true
+    tailscale:
+      enabled: true
+      hostname: SAM-DESKTOP
+      tailnet_ip: 100.<SAM-DESKTOP_TAILNET_IP>
+  notes:
+  - Primary workstation and main host for local services.
+
+- machine_name: SAM-IPAD
+  role: Tablet / Remote Client
+  os:
+    family: iPadOS
+    version: <IPADOS_VERSION>
+  network:
+    tailscale:
+      enabled: true
+      hostname: SAM-IPAD
+      tailnet_ip: 100.<SAM-IPAD_TAILNET_IP>
+  notes:
+  - Used for remote access to SAM-DESKTOP and services via Tailscale.
+
+- machine_name: SAM-ROUTER
+  role: Home Router
+  model: Plume Home (SuperPod)
+  lan:
+    ipv4_gateway: 192.168.40.1
+    subnet_cidr: 192.168.40.0/24
+    dhcp:
+      enabled: true
+      pool: <DHCP_POOL_RANGE>
+      reservations:
+      - hostname: SAM-PI5
+        ipv4: 192.168.40.73
+        mac_address: <PI5_MAC>
+    dns:
+      primary: <DNS_PRIMARY>
+      secondary: <DNS_SECONDARY>
+      notes: Set to upstream DNS resolver(s); AdGuard Home/Pi-hole optional if you later add it.
+  wan:
+    connection_type: <WAN_TYPE>
+    public_ip: <PUBLIC_IP_OR_CGNAT>
+    isp: <ISP_NAME>
+  capabilities:
+    supports_wireguard_server: false
+    supports_port_forwarding: true
+    notes: CGNAT may apply depending on ISP plan; verify before relying on inbound ports.
+  notes:
+  - Plume Home SuperPod router; manages LAN DHCP/DNS and Wi-Fi mesh.
+
+- machine_name: SAM-PI5
+  role: Raspberry Pi 5 Orchestrator
+  hardware:
+    model: Raspberry Pi 5
+    ram_gb: 16
+    psu: CanaKit 27W/5A official PSU
+    storage:
+      type: NVMe HAT
+      capacity_gb: 256
+      notes: NVMe HAT with shield
+    cooling:
+      heatsink: large
+      fan: temp-reactive active cooling
+      case: ventilated metal
+  os:
+    family: Linux
+    distro: Raspberry Pi OS
+    kernel: <PI_KERNEL_VERSION>
+  network:
+    interfaces:
+      eth0:
+        mac_address: <PI5_MAC>
+        ipv4_address: 192.168.40.73/24
+        metric: 100
+      wlan0:
+        mac_address: <PI5_WIFI_MAC>
+        ipv4_address: 192.168.40.208/24
+        metric: 600
+    canonical_ipv4: 192.168.40.73
+    tailscale:
+      enabled: true
+      hostname: SAM-PI5
+      tailnet_ip: 100.<SAM-PI5_TAILNET_IP>
+  diagnostics:
+    commands:
+    - method: shell
+      command: ip a
+    - method: shell
+      command: ip r
+    - method: shell
+      command: nmcli dev show
+    - method: shell
+      command: cat /etc/resolv.conf
+    - method: shell
+      command: sudo ethtool eth0
+    - method: shell
+      command: iw dev
+    - method: shell
+      command: iwconfig
+    - method: shell
+      command: sudo ss -lntup
+    notes:
+    - 'Pi is multi-homed: Ethernet (192.168.40.73/24, metric 100) and Wi-Fi (192.168.40.208/24, metric 600). Default route uses eth0.'
+    - DNS is being managed by Tailscale (resolv.conf points to 100.100.100.100).
+
+network_services:
+  vpn:
+    provider: AdGuard VPN
+    type: commercial_vpn
+    used_on_devices:
+    - SAM-DESKTOP
+    - SAM-IPAD
+    - SAM-LAPTOP
+    - SAM-IPHONE
+    - SAM-PI5
+    notes:
+    - Outbound privacy VPN; typically runs as a client on end-devices.
+
+meta:
+  timezone: America/Chicago

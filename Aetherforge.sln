@@ -26,6 +26,7 @@ Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "docs", "docs", "{9BD68711-2
 		docs\AetherChecklist.M6.md = docs\AetherChecklist.M6.md
 		docs\directory.md = docs\directory.md
 		docs\roadmap.md = docs\roadmap.md
+		docs\network_specs.yaml = docs\network_specs.yaml
 		docs\spec.md = docs\spec.md
 		docs\_script_template.ps1 = docs\_script_template.ps1
 	EndProjectSection
