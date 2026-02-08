@@ -1,1 +1,25 @@
-{"schema_version":1,"captured_utc":"2026-01-31T06:52:44Z","core":{"reachable":true,"base_url":"http://127.0.0.1:8484"},"ollama":{"reachable":true,"version":"0.14.1","models_dir":"/var/lib/ollama"},"pins":{"pinned_yaml_path":"D:\\Aetherforge\\config\\pinned.yaml","pins_match":true,"model_digests_match":true},"db":{"path":"/var/lib/aetherforge/conversations.sqlite","healthy":true,"error":null},"gpu":{"visible":true,"evidence":"NVIDIA GeForce RTX 4080 SUPER, 591.74"},"tailnet":{"serve_enabled":false,"published_port":null},"files":{"settings_exists":true,"pinned_exists":true}}
+{
+  "schema_version": 1,
+  "captured_utc": "2026-02-08T09:03:08Z",
+  "ollama": {
+    "reachable": false,
+    "version": null,
+    "base_url": "http://127.0.0.1:11434"
+  },
+  "pins": {
+    "pinned_yaml_path": "D:\\Aetherforge\\config\\pinned.yaml",
+    "pins_match": true,
+    "model_digests_match": false,
+    "detail": [
+      "general.fast tag=qwen2.5:7b-instruct pinned=845dbda0ea48ed749caafd9e6037047aa19acfcfd82e704d7ca97d631a0b697e live=<ollama not reachable>"
+    ]
+  },
+  "gpu": {
+    "visible": true,
+    "evidence": null
+  },
+  "files": {
+    "pinned_exists": true,
+    "settings_exists": true
+  }
+}

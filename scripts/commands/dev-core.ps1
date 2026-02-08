@@ -52,6 +52,13 @@ function Get-RepoRoot {
 
 $repo = Get-RepoRoot
 
+# Build/run ONLY the Core project in WSL (avoid Windows-targeting projects in the .sln)
+$coreProjectRel = "src/Aetherforge.Core/Aetherforge.Core.csproj"
+$coreProjectWin = Join-Path $repo $coreProjectRel
+if (-not (Test-Path -LiteralPath $coreProjectWin)) {
+  throw "Core project not found: $coreProjectWin"
+}
+
 # We run inside WSL, so convert Windows path to /mnt/... automatically.
 # wslpath -a handles D:\Aetherforge -> /mnt/d/Aetherforge
 $repoWsl = (wsl.exe -- wslpath -a $repo) -join "`n"
@@ -62,20 +69,24 @@ if (-not $repoWsl) { throw "Failed to convert repo path to WSL path." }
 # Escape for bash single-quoted literal
 $repoWslEsc = ($repoWsl -replace "'", "'\''")
 
-# Base command
-$dotnetVerb = if ($Watch) { "watch run" } else { "run" }
+# Base command (structured to avoid watch/run option parsing edge cases)
+$dotnetCmd = if ($Watch) {
+  "watch --project ./$coreProjectRel run"
+} else {
+  "run --project ./$coreProjectRel"
+}
 
 # Extra args pass-through: allow user to pass dotnet args after '--'
 $extra = @($Args)
 
-# Build first unless skipped
+# Build first unless skipped (build ONLY Core project, not the solution)
 if (-not $NoBuild) {
-  Write-Host "Building (WSL): dotnet build .\Aetherforge.sln" -ForegroundColor Cyan
-  wsl.exe -- bash -lc "cd '$repoWslEsc' && dotnet build ./Aetherforge.sln"
+  Write-Host "Building (WSL): dotnet build ./$coreProjectRel" -ForegroundColor Cyan
+  wsl.exe -- bash -lc "cd '$repoWslEsc' && dotnet build ./$coreProjectRel"
   if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 }
 
-Write-Host "Starting Core (WSL): dotnet $dotnetVerb --project ./src/Aetherforge.Core" -ForegroundColor Cyan
+Write-Host "Starting Core (WSL): dotnet $dotnetCmd" -ForegroundColor Cyan
 
 # Quote pass-through args safely for bash.
 $extraJoined = ""
@@ -84,7 +95,7 @@ if ($extra.Count -gt 0) {
   $extraJoined = " " + ($escaped -join " ")
 }
 
-$bash = "cd '$repoWslEsc' && dotnet $dotnetVerb --project ./src/Aetherforge.Core$extraJoined"
+$bash = "cd '$repoWslEsc' && dotnet $dotnetCmd$extraJoined"
 
 wsl.exe -- bash -lc $bash
 exit $LASTEXITCODE

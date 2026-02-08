@@ -9,6 +9,10 @@
 param(
   [switch] $Help,
 
+  # Forwarded toggles (match dev-core ergonomics)
+  [switch] $NoBuild,
+  [switch] $Watch,
+
   [Parameter(ValueFromRemainingArguments = $true)]
   [string[]] $Args
 )
@@ -19,13 +23,20 @@ $ErrorActionPreference = 'Stop'
 function Show-Usage {
 @"
 Usage:
-  aether start [-- <args passed to dev-core...>]
+  aether start [-NoBuild] [-Watch] [-- <extra dotnet args...>]
 
 Description:
-  Temporary alias for 'aether dev-core'. All arguments are forwarded.
+  Temporary alias for 'aether dev-core'. Starts Aetherforge.Core in WSL.
+  All additional arguments are forwarded to dev-core.
+
+Flags:
+  -NoBuild   Skip 'dotnet build' before run (in WSL).
+  -Watch     Use 'dotnet watch run' instead of 'dotnet run'.
+  --         Everything after this is passed to dotnet (e.g. app args).
 
 Examples:
   aether start
+  aether start -Watch
   aether start -- --urls http://127.0.0.1:8484
 "@ | Write-Host
 }
@@ -40,5 +51,11 @@ if (-not (Test-Path -LiteralPath $target)) {
   throw "Missing target script: $target"
 }
 
-& $target @Args
+# Build a forward-arg list that preserves switch semantics and passthrough args.
+$forward = @()
+if ($NoBuild) { $forward += "-NoBuild" }
+if ($Watch)   { $forward += "-Watch" }
+if ($Args -and $Args.Count -gt 0) { $forward += $Args }
+
+& $target @forward
 exit $LASTEXITCODE

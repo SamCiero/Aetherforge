@@ -22,7 +22,7 @@ Prove the **runtime substrate** is real and repeatable:
 - [x] Enable WSL2 on Windows
 - [x] Install Ubuntu LTS distro (WSL)
 - [x] Configure WSL2 mirrored networking
-- [ ] Capture evidence that mirrored networking is enabled (command output / config snippet) and save under:
+- [x] Capture evidence that mirrored networking is enabled (command output / config snippet) and save under:
   - `D:\Aetherforge\logs\bootstrap\wsl_networking.txt` (or similar)
 
 ### 2) GPU availability (WSL)
