@@ -88,6 +88,11 @@ Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "commands", "commands", "{65
 		scripts\commands\test.ps1 = scripts\commands\test.ps1
 	EndProjectSection
 EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "bin", "bin", "{22B77450-7DEF-4A18-8D4C-7E51A0EC1E10}"
+	ProjectSection(SolutionItems) = preProject
+		bin\capture_wsl_networking.ps1 = bin\capture_wsl_networking.ps1
+	EndProjectSection
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
