@@ -12,7 +12,7 @@
 
 # If someone accidentally recreates repo-root bin as "scripts", ignore it.
 # (Build outputs already ignore **/bin/ below.)
-/bin/
+**/*.diff
 
 #------------------------------------------------------------------------------
 # Visual Studio / MSBuild / .NET build outputs

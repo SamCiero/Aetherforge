@@ -133,7 +133,7 @@ public sealed record StatusDbInfo(
 /// </summary>
 public sealed record StatusOllamaInfo(
     bool Reachable,
-    string Version,
+    string? Version,
     [property: JsonPropertyName("base_url")] string BaseUrl,
     // Optional/forward-compatible: some deployments can surface this; others cannot.
     [property: JsonPropertyName("models_dir")] string? ModelsDir = null);
@@ -174,6 +174,12 @@ public sealed record StatusTailnetInfo(
 public sealed record StatusFilesInfo(
     [property: JsonPropertyName("settings_exists")] bool SettingsExists,
     [property: JsonPropertyName("pinned_exists")] bool PinnedExists);
+
+/// <summary>
+/// Response shape from Ollama's <c>GET /api/version</c>.
+/// </summary>
+public sealed record OllamaVersion(
+    [property: JsonPropertyName("version")] string Version);
 
 // ---------------------------
 // Ollama tags (used by /v1/status)
