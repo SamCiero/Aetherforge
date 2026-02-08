@@ -111,6 +111,7 @@ logs/
 **/logs/
 *.etl
 *.dmp
+logs/bootstrap/status.json
 
 # Local DB / runtime state if it ever lands under repo paths
 **/*.sqlite
