@@ -30,6 +30,12 @@ public sealed class Program
         WriteIndented = false
     };
 
+    // /v1/status must keep stable keys even when values are null (spec 7.4.1).
+    private static readonly JsonSerializerOptions StatusJsonOpts = new(JsonOpts)
+    {
+        DefaultIgnoreCondition = JsonIgnoreCondition.Never
+    };
+
     // Reuse for short, best-effort probes (e.g., /v1/status). For streaming chat we use a dedicated client.
     private static readonly HttpClient StatusHttp = new() { Timeout = TimeSpan.FromSeconds(2) };
 
@@ -75,16 +81,24 @@ public sealed class Program
             // Probe Ollama for version and tags (best effort). If unreachable or error,
             // fields fall back to default values and reachability flag is false.
             bool ollamaReachable = false;
-            string ollamaVersionLocal = "";
+            string? ollamaVersionLocal = null;
             OllamaTags? tags = null;
             try
             {
                 var ver = await StatusHttp.GetFromJsonAsync<OllamaVersion>($"{ollamaBaseUrl}/api/version");
-                if (ver is not null && !string.IsNullOrWhiteSpace(ver.Version))
+                if (ver is not null)
                 {
                     ollamaReachable = true;
-                    ollamaVersionLocal = ver.Version;
-                    tags = await StatusHttp.GetFromJsonAsync<OllamaTags>($"{ollamaBaseUrl}/api/tags");
+                    ollamaVersionLocal = string.IsNullOrWhiteSpace(ver.Version) ? null : ver.Version;
+
+                    try
+                    {
+                        tags = await StatusHttp.GetFromJsonAsync<OllamaTags>($"{ollamaBaseUrl}/api/tags");
+                    }
+                    catch
+                    {
+                        // tags unavailable; leave null
+                    }
                 }
             }
             catch
@@ -92,29 +106,18 @@ public sealed class Program
                 // unreachable; leave defaults
             }
 
-            // Pins verification. Null indicates unavailable. Detail surfaces parse/validation errors.
-            bool? pinsMatch;
-            bool? modelDigestsMatch;
-            string? pinsDetail;
-            if (pinnedManifest is null)
-            {
-                pinsMatch = null;
-                modelDigestsMatch = null;
-                pinsDetail = pinsError ?? "pinned.yaml missing or unreadable";
-            }
-            else if (tags?.Models is null)
-            {
-                pinsMatch = null;
-                modelDigestsMatch = null;
-                pinsDetail = "ollama tags unavailable";
-            }
-            else
-            {
-                // Consider the manifest complete unless the loader reported missing required digests.
-                pinsMatch = string.IsNullOrWhiteSpace(pinsError);
-                modelDigestsMatch = Pins.VerifyAgainstTags(pinnedManifest, tags);
-                pinsDetail = pinsError;
-            }
+            // Pins verification (spec 7.4.1):
+            // - pins_match reflects manifest completeness; null only when manifest cannot be read.
+            // - model_digests_match requires live tags; null when tags unavailable.
+            bool? pinsMatch = pinnedManifest is null ? null : string.IsNullOrWhiteSpace(pinsError);
+
+            bool? modelDigestsMatch = (pinnedManifest is not null && tags?.Models is not null)
+                ? Pins.VerifyAgainstTags(pinnedManifest, tags)
+                : null;
+
+            string? pinsDetail = pinnedManifest is null
+                ? (pinsError ?? "pinned.yaml missing or unreadable")
+                : (string.IsNullOrWhiteSpace(pinsError) ? null : pinsError);
 
             // DB health: open and verify schema version equals 1. Capture any error.
             var dbHealthy = false;
@@ -162,7 +165,7 @@ public sealed class Program
                 Files: new StatusFilesInfo(File.Exists(SettingsPath), File.Exists(PinnedPath))
             );
 
-            return Results.Json(status, options: JsonOpts);
+            return Results.Json(status, options: StatusJsonOpts);
         });
 
         // ---------------------- POST /v1/conversations ----------------------
@@ -183,8 +186,6 @@ public sealed class Program
             // unpinned. In strict mode, unpinned roles/tiers result in an error. In fallback mode,
             // the server resolves to a fallback model while preserving the requested role and tier.
             PinnedEntry? chosen = null;
-            bool usedFallback = false;
-
             if (pinnedManifest.Entries.TryGetValue((role, tier), out var entry) && !string.IsNullOrWhiteSpace(entry.Digest))
             {
                 // Found a pinned digest; use it.
@@ -194,7 +195,7 @@ public sealed class Program
             {
                 // Either no entry or digest null/empty: this is unpinned.
                 var mode = (settings?.Pins?.Mode ?? "strict").Trim().ToLowerInvariant();
-                if (mode == "strict")
+                if (mode != "fallback")
                 {
                     // Distinguish between no entry vs entry without digest for error clarity
                     if (!pinnedManifest.Entries.ContainsKey((role, tier)))
@@ -213,16 +214,24 @@ public sealed class Program
                         "Pin this model or enable fallback mode."
                     ));
                 }
-                // Fallback mode: always resolve to general.fast regardless of fallback fields.
-                usedFallback = true;
-                var fbRole = "general";
-                var fbTier = "fast";
+
+                // Fallback mode (spec 5.2): resolve to pins.fallback_role/pins.fallback_tier.
+                var fbRole = (settings?.Pins?.FallbackRole ?? "").Trim().ToLowerInvariant();
+                var fbTier = (settings?.Pins?.FallbackTier ?? "").Trim().ToLowerInvariant();
+                if (string.IsNullOrWhiteSpace(fbRole) || string.IsNullOrWhiteSpace(fbTier))
+                {
+                    return ApiError.Failed(
+                        "PIN_FALLBACK_INVALID",
+                        "Fallback role/tier not configured",
+                        hint: "Set pins.fallback_role and pins.fallback_tier in settings.yaml."
+                    );
+                }
                 if (!pinnedManifest.Entries.TryGetValue((fbRole, fbTier), out var fbEntry) || string.IsNullOrWhiteSpace(fbEntry.Digest))
                 {
                     return ApiError.Failed(
                         "PIN_FALLBACK_INVALID",
                         "Fallback pin missing or unpinned",
-                        hint: "Ensure general.fast has a valid digest in pinned.yaml."
+                        hint: $"Ensure {fbRole}.{fbTier} has a valid digest in pinned.yaml."
                     );
                 }
                 chosen = fbEntry;
@@ -319,11 +328,8 @@ public sealed class Program
             // Create assistant placeholder message to get message_id for SSE events
             var assistantCreatedUtc = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ");
             var assistantId = await Db.InsertMessageAsync(conn, req.ConversationId, assistantCreatedUtc, "assistant", content: "", metaJson: null);
-
-            // Determine resolution for this conversation: if the pinned manifest does not
-            // contain a digest for the requested role/tier or the digest differs from the
-            // stored model digest, emit a fallback resolution hint. Only attempt when
-            // a manifest is available; otherwise leave null.
+            // Determine resolution for this conversation.
+            // Only report a fallback when the conversation digest matches the configured fallback digest (spec 10.3).
             string? resolution = null;
             if (pinnedManifest is not null)
             {
@@ -331,14 +337,20 @@ public sealed class Program
                     !string.IsNullOrWhiteSpace(ent.Digest) &&
                     string.Equals(ent.Digest, convo.ModelDigest, StringComparison.Ordinal))
                 {
-                    // strict match; no resolution needed
                     resolution = null;
                 }
                 else
                 {
-                    // Unpinned or mismatched: fallback used. Always report general.fast to
-                    // reflect the policy defined in this refactor.
-                    resolution = "fallback:general.fast";
+                    var fbRole = (settings?.Pins?.FallbackRole ?? "").Trim().ToLowerInvariant();
+                    var fbTier = (settings?.Pins?.FallbackTier ?? "").Trim().ToLowerInvariant();
+                    if (!string.IsNullOrWhiteSpace(fbRole) &&
+                        !string.IsNullOrWhiteSpace(fbTier) &&
+                        pinnedManifest.Entries.TryGetValue((fbRole, fbTier), out var fbEnt) &&
+                        !string.IsNullOrWhiteSpace(fbEnt.Digest) &&
+                        string.Equals(fbEnt.Digest, convo.ModelDigest, StringComparison.Ordinal))
+                    {
+                        resolution = $"fallback:{fbRole}.{fbTier}";
+                    }
                 }
             }
 
