@@ -11,6 +11,7 @@ Provide a Windows-native daily-driver UI layered over the Core API.
 - [ ] Conversation title editing via `PATCH /v1/conversations/{id}`
 - [ ] Streaming chat view consuming SSE from `POST /v1/chat`
 - [ ] Role/tier selector (manual routing)
+- [ ] Changing role/tier must create a **new conversation** (do not reuse an existing conversation when the user switches)
 - [ ] Export button
 - [ ] Autostart toggle UI (wired to launcher)
 - [ ] Enforce "no UI-only state" (all persisted via Core)

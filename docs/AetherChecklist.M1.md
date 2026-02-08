@@ -63,13 +63,11 @@ It **does** aim to provide:
 - [ ] Enforce `settings.yaml` schema version = 1
 - [ ] Validate required sections and constraints:
   - [ ] `ports.core_bind_url` and `ports.ollama_base_url` are absolute HTTP URLs using host `127.0.0.1`
-  - [ ] `defaults.role` in `{general,coding,agent}`
-  - [ ] `defaults.tier` in `{fast,thinking}` (Agent selection is role-driven; agent tiers are `primary/verifier`)
+  - [ ] `defaults.role` in `{general,coding}` (Agent cannot be the default)
+  - [ ] `defaults.tier` in `{fast,thinking}`
   - [ ] `pins.mode` in `{strict,fallback}`
-  - [ ] `pins.fallback_role` in `{general,coding,agent}`
-  - [ ] `pins.fallback_tier` allowed set depends on fallback_role:
-    - if fallback_role ∈ {general,coding}: tier ∈ `{fast,thinking}`
-    - if fallback_role == `agent`: tier ∈ `{primary,verifier}`
+  - [ ] `pins.fallback_role` in `{general,coding}` (Agent must not be used as a fallback role)
+  - [ ] `pins.fallback_tier` in `{fast,thinking}` (fallback applies only to General/Coding roles)
   - [ ] Boundary config validated (see §5)
 - [ ] Ensure settings-load errors are surfaced deterministically:
   - [ ] `/v1/status` `files.settings_exists=true` but includes a clear `detail` somewhere appropriate (or stable error code) when settings invalid

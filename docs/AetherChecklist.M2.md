@@ -61,6 +61,8 @@ Deliver a usable **CLI-first** core assistant for daily evaluation:
   - `coding.fast`
   - `coding.thinking`
 
+- [ ] When changing role or tier, start a **new conversation** (do not reuse an existing conversation when the user switches).
+
 ### 4) Generation parameters per role/tier (settings-driven)
 - [ ] Define baseline generation parameters in `settings.yaml` under `generation.by_profile`:
   - `general.fast` vs `general.thinking`

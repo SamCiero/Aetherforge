@@ -8,7 +8,6 @@ Make Aetherforge operable like a product on Windows: lifecycle control, determin
   - `start` (WSL + Ollama + Core)
   - `stop`
   - `status` (human + `--json`)
-  - `chat` (interactive)
   - `export <id>`
   - `backup` (create Backup Bundle)
   - `restore --from <bundle>` (restore Backup Bundle)
